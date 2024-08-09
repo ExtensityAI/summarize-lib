@@ -1,0 +1,11 @@
+{
+    "version": "0.9",
+    "name": "ExtensityAI/summarize-lib",
+    "description": "Summarize long texts and documents.",
+    "expressions": [
+        {
+            "module": "src/hierarchical",
+            "type": "HierarchicalSummary"
+        }
+    ]
+}
