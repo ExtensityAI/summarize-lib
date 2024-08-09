@@ -7,5 +7,6 @@
             "module": "src/hierarchical",
             "type": "HierarchicalSummary"
         }
-    ]
+    ],
+    "dependencies": []
 }
