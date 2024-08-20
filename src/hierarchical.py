@@ -81,7 +81,7 @@ class HierarchicalSummary(ValidatedFunction):
                 if self.content_types is not None
                 else ""
             )
-            + "The summary must be in the same language as the text.\n"
+            + "The summary must be in the language specified in [[CONTENT LANGUAGE]].\n"
             + f"Extract important facts from the text and return them in a list in JSON format as 'facts'.\n"
             + f"[[IMPORTANT]] Ensure that the summary is consistent with the facts. Do not add information not contained in the text.\n"
             + r'JSON schema: {"summary": "string", "facts": "array of strings"}'
@@ -247,8 +247,30 @@ class HierarchicalSummary(ValidatedFunction):
 
             # add to overall usage
             self.add_usage(usage)
-
         return res.type
+    
+    def get_asset_language(self, content):
+        class ContentLanguage(BaseModel):
+            language: str
+
+        # construct function to determine asset type, use ValidatedFunction to restrict to allowed types
+        asset_type_func = ValidatedFunction(
+            data_model=ContentLanguage,
+            retry_count=self.retry_count,
+            prompt="Which language is this text in?\n",
+            static_context=r"Return JSON: {'language': string}",
+        )
+
+        res, usage = asset_type_func(
+            content,
+            preview=False,
+            response_format={"type": "json_object"},
+            seed=self.seed,
+        )
+
+        # add to overall usage
+        self.add_usage(usage)
+        return res.language
 
     def forward(self) -> Summary:
         self.reset_usage()
@@ -268,7 +290,9 @@ class HierarchicalSummary(ValidatedFunction):
                 chunks = self.chunk_by_token_count(data, chunk_size)
                 if asset_type is None:
                     asset_type = self.get_asset_type(chunks[0])
-                    self.adapt("[[CONTENT TYPE]]\n" + asset_type)
+                    asset_language = self.get_asset_language(chunks[0])
+                    self.adapt("[[CONTENT TYPE]]\n" + asset_type)                    
+                    self.adapt("[[CONTENT LANGUAGE]]\n" + asset_language)
 
                 res, summary_token_count = self.summarize_chunks(chunks)
                 data = res.summary
@@ -286,8 +310,11 @@ class HierarchicalSummary(ValidatedFunction):
             return res, self.get_usage()
         else:
             asset_type = self.get_asset_type(self.content)
+            asset_language = self.get_asset_language(self.content)
+            
             self.adapt("[[CONTENT TYPE]]\n" + asset_type)
-
+            self.adapt("[[CONTENT LANGUAGE]]\n" + asset_language)
+            
             res, usage = super().forward(
                 self.content,
                 preview=False,
