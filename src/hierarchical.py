@@ -234,7 +234,8 @@ class HierarchicalSummary(ValidatedFunction):
                 data_model=ContentType,
                 retry_count=self.retry_count,
                 prompt="What type of content is this text?\n"
-                + f"Allowed types: {', '.join(self.content_types)}\n\n",
+                + f"Allowed types: {', '.join(self.content_types)}\n"
+                + "The content type must be mapped exactly/literally to one of the listed types. No other type allowed!\n\n",
                 static_context=r"Return JSON: {'type': string}",
             )
 
@@ -248,7 +249,7 @@ class HierarchicalSummary(ValidatedFunction):
             # add to overall usage
             self.add_usage(usage)
         return res.type
-    
+
     def get_asset_language(self, content):
         class ContentLanguage(BaseModel):
             language: str
@@ -291,7 +292,7 @@ class HierarchicalSummary(ValidatedFunction):
                 if asset_type is None:
                     asset_type = self.get_asset_type(chunks[0])
                     asset_language = self.get_asset_language(chunks[0])
-                    self.adapt("[[CONTENT TYPE]]\n" + asset_type)                    
+                    self.adapt("[[CONTENT TYPE]]\n" + asset_type)
                     self.adapt("[[CONTENT LANGUAGE]]\n" + asset_language)
 
                 res, summary_token_count = self.summarize_chunks(chunks)
@@ -311,10 +312,10 @@ class HierarchicalSummary(ValidatedFunction):
         else:
             asset_type = self.get_asset_type(self.content)
             asset_language = self.get_asset_language(self.content)
-            
+
             self.adapt("[[CONTENT TYPE]]\n" + asset_type)
             self.adapt("[[CONTENT LANGUAGE]]\n" + asset_language)
-            
+
             res, usage = super().forward(
                 self.content,
                 preview=False,
