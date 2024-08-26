@@ -81,7 +81,7 @@ class HierarchicalSummary(ValidatedFunction):
                 if self.content_types is not None
                 else ""
             )
-            + "The summary must be in the language specified in [[CONTENT LANGUAGE]].\n"
+            + "The summary must be in the language specified in [[CONTENT LANGUAGE]], regardless of the source material.\n"
             + f"Extract important facts from the text and return them in a list in JSON format as 'facts'.\n"
             + f"[[IMPORTANT]] Ensure that the summary is consistent with the facts. Do not add information not contained in the text.\n"
             + r'JSON schema: {"summary": "string", "facts": "array of strings"}'
@@ -258,7 +258,8 @@ class HierarchicalSummary(ValidatedFunction):
         asset_type_func = ValidatedFunction(
             data_model=ContentLanguage,
             retry_count=self.retry_count,
-            prompt="Which language is this text in?\n",
+            prompt="Which language is this text in?\n"
+            + "Follow the ISO 639 standard for language names, country and language codes; use string format: '[[language_name]] ([[country]]) [[language_code]]'\n",
             static_context=r"Return JSON: {'language': string}",
         )
 
