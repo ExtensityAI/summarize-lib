@@ -248,8 +248,10 @@ class HierarchicalSummary(ValidatedFunction):
 
             # add to overall usage
             self.add_usage(usage)
-        return res.type
-
+            return res.type
+        else:
+            return "Unknown"
+    
     def get_asset_language(self, content):
         class ContentLanguage(BaseModel):
             language: str
