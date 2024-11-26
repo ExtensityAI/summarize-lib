@@ -74,6 +74,22 @@ class HierarchicalSummary(ValidatedFunction):
 
     @property
     def prompt(self):
+        type_specific_prompts = {
+            "Interview": "Identify and distinguish between different speakers. Include key quotes and main discussion points.",
+            "Keynote": "Include speaker details and their expertise. Highlight key messages and main takeaways.",
+            "Scientific Paper": "Extract key statements, contributions, main results, and important references. Focus on methodology and findings.",
+            "Report": "Highlight numerical results, key statistics, and main takeaways. Include significant findings and conclusions.",
+            "Book": "Include author information, main plot points, and key character descriptions. Highlight character development and relationships.",
+            "Presentation Slides": "Determine if this is a motivational talk, results presentation, or idea/pitch. For motivational talks, focus on key messages and call-to-action. For result presentations, emphasize numerical results and achievements. For idea/pitch presentations, highlight the core idea and value proposition."
+        }
+
+        # Get type-specific prompt
+        type_prompt = ""
+        if self.content_types is not None and hasattr(self, '_content_type'):
+            content_type = self._content_type
+            if content_type in type_specific_prompts:
+                type_prompt = f"\nFor this {content_type}: {type_specific_prompts[content_type]}"
+
         return (
             f"Create a comprehensive summary of the provided content and return the result as JSON.\n"
             + (
@@ -81,7 +97,8 @@ class HierarchicalSummary(ValidatedFunction):
                 if self.content_types is not None
                 else ""
             )
-            + "The summary must be in the language specified in [[CONTENT LANGUAGE]], regardless of the source material.\n"
+            + type_prompt  # Add the type-specific prompt
+            + "\nThe summary must be in the language specified in [[CONTENT LANGUAGE]], regardless of the source material.\n"
             + f"Extract important facts from the text and return them in a list in JSON format as 'facts'.\n"
             + f"[[IMPORTANT]] Ensure that the summary is consistent with the facts. Do not add information not contained in the text.\n"
             + r'JSON schema: {"summary": "string", "facts": "array of strings"}'
@@ -246,7 +263,9 @@ class HierarchicalSummary(ValidatedFunction):
                 seed=self.seed,
             )
 
-            # add to overall usage
+            # Store the content type for use in prompt
+            self._content_type = res.type
+
             self.add_usage(usage)
             return res.type
         else:
