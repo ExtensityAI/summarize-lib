@@ -7,6 +7,7 @@ from pydantic import BaseModel, field_validator
 
 from symai.components import FileReader, Function, ValidatedFunction
 from symai.core_ext import bind
+import tempfile
 
 
 class Summary(BaseModel):
@@ -55,6 +56,7 @@ class HierarchicalSummary(ValidatedFunction):
             file_name = asset_name
             file_content = str(content)
         self.content = f"[[ASSET::{file_name}]]: <<<\n{str(file_content)}\n>>>\n"
+        self.content_only = str(file_content)
 
     def read_file(self, file_link: str):
         self.print_verbose(f"Reading file from {file_link}")
@@ -66,11 +68,18 @@ class HierarchicalSummary(ValidatedFunction):
 
     def download_file(self, file_link: str):
         self.print_verbose(f"Downloading file from {file_link}")
+        
+        
         with urllib.request.urlopen(file_link) as f:
-            content = f.read().decode("utf-8")
-            file_name = urllib.parse.urlparse(file_link).path
-            val = f"[[ASSET::{file_name}]]: <<<\n{str(content)}\n>>>\n"
-            return val, file_name
+            with tempfile.NamedTemporaryFile(delete=False) as tmp_file:
+                tmp_file.write(f.read())
+                tmp_file.flush()
+                tmp_file_name = tmp_file.name
+
+        content, file_name = self.read_file(tmp_file_name)
+        os.remove(tmp_file_name)
+        return content, file_name
+
 
     @property
     def prompt(self):
