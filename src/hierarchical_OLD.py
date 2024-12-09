@@ -7,14 +7,6 @@ from pydantic import BaseModel, field_validator
 
 from symai.components import FileReader, Function, ValidatedFunction
 from symai.core_ext import bind
-from functions import LLMDataModel, ResultValidator
-
-
-class ChunkSummary(LLMDataModel):
-    summary: str
-    facts: List[str]
-    type: str = None
-    section_header: str = "CHUNK SUMMARY"
 
 
 class Summary(BaseModel):
@@ -51,10 +43,6 @@ class HierarchicalSummary(ValidatedFunction):
         self.max_output_tokens = max_output_tokens
         self.content_types = content_types
         self.seed = seed
-        self.result_validator = ResultValidator(
-            data_model=Summary,
-            validation_retry_count=3,
-        )
 
         file_content = None
         file_name = None
@@ -215,36 +203,20 @@ class HierarchicalSummary(ValidatedFunction):
         chunk_summaries = []
         chunk_facts = []
 
-        for i, chunk in enumerate(chunks):
-            # Use ChunkSummary for individual chunk validation
+        for chunk in chunks:
             res, usage = super().forward(
                 chunk,
                 preview=False,
                 response_format={"type": "json_object"},
             )
-            
-            # Validate each chunk using LLMDataModel
-            chunk_summary = ChunkSummary(
-                summary=res.summary,
-                facts=res.facts,
-                type=self._content_type,
-            )
-            self.print_verbose(f"Chunk {i+1} Summary:\n{str(chunk_summary)}")
-            
             chunk_summaries.append(res.summary)
             chunk_facts.extend(res.facts)
 
-        # Create final summary
         res = Summary(
             summary="\n".join(chunk_summaries),
             facts=chunk_facts,
-            type=self._content_type
         )
-        
-        # Validate entire summary using ResultValidator
-        validated_res, validator_usage = self.result_validator(self.prompt)
-        
-        return validated_res, self.compute_required_tokens(validated_res.summary, count_context=False)
+        return res, self.compute_required_tokens(res.summary, count_context=False)
 
     def calculate_chunk_size(self, total_tokens):
         num_prompt_tokens = self.compute_required_tokens("", count_context=True)

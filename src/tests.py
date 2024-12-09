@@ -1,6 +1,13 @@
 import pytest
+import time
 from symai import Symbol
 from hierarchical import HierarchicalSummary
+from hierarchical_OLD import HierarchicalSummary as HierarchicalSummaryOld
+import logging
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 CONTENT_TYPES = [
     "Interview",
@@ -136,3 +143,42 @@ def test_pitch_presentation_slides_summary(file_path):
 #     # Verify numerical results and achievements
 #     sym = Symbol("Does this summary include numerical results and achievements? {summary.summary}")
 #     assert "yes" in sym().lower() or "true" in sym().lower()
+
+@pytest.mark.performance
+@pytest.mark.parametrize("file_path", ["../testfiles/symbolicai_no_refs.pdf"])
+def test_summary_performance_comparison(file_path):
+    # Test new summarizer
+    start_time = time.time()
+    summarizer_new = HierarchicalSummary(
+        file_link=file_path,
+        content_types=CONTENT_TYPES
+    )
+    summary_new, _ = summarizer_new()
+    elapsed_time_new = time.time() - start_time
+    
+    # Performance assertions for new
+    assert elapsed_time_new < 300
+    print(f"New paper summarization took {elapsed_time_new:.2f} seconds")
+    print(f"New paper summary: \n {summary_new.summary} \n {summary_new.facts}")
+
+    # Test old summarizer 
+    start_time = time.time()
+    summarizer_old = HierarchicalSummaryOld(
+        file_link=file_path,
+        content_types=CONTENT_TYPES
+    )
+    summary_old, _ = summarizer_old()
+    elapsed_time_old = time.time() - start_time
+
+    # Performance assertions for old
+    assert elapsed_time_old < 300
+    print(f"Old paper summarization took {elapsed_time_old:.2f} seconds")
+    print(f"Old paper summary: \n {summary_old.summary} \n {summary_old.facts}")
+
+    comparison = Symbol(f"Does the new summary include as detailed information as the old summary?"
+                         + f"\nIs the new summary of the same or better calibre than the old summary? Return yes or no and explain why."
+                         + f"\nNew summary: {summary_new}"
+                         + f"\nOld summary: {summary_old}").interpret()
+    
+    assert "yes" in comparison.lower() or "true" in comparison.lower()
+    print(comparison)
