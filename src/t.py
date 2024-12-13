@@ -13,7 +13,7 @@ def test():
     # Test with local file
     summarizer = HierarchicalSummary(
         file_link="/Users/ryang/Work/ExtensityAI/summarize-lib/testfiles/symbolicai_no_refs.pdf",
-        content_types=CONTENT_TYPES
+        content_types=True
     )
     summary, _ = summarizer()
     

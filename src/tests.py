@@ -3,6 +3,7 @@ import time
 from symai import Symbol
 from hierarchical import HierarchicalSummary
 from hierarchical_OLD import HierarchicalSummary as HierarchicalSummaryOld
+from hierarchical_OLD_BASIC import HierarchicalSummary as HierarchicalSummaryOldBasic
 import logging
 
 # Configure logging
@@ -177,6 +178,35 @@ def test_summary_performance_comparison(file_path):
 
     comparison = Symbol(f"Does the new summary include as detailed information as the old summary?"
                          + f"\nIs the new summary of the same or better calibre than the old summary? Return yes or no and explain why."
+                         + f"\nNew summary: {summary_new}"
+                         + f"\nOld summary: {summary_old}").interpret()
+    
+    assert "yes" in comparison.lower() or "true" in comparison.lower()
+    print(comparison)
+
+@pytest.mark.compare
+@pytest.mark.parametrize("file_path", ["../testfiles/symbolicai_no_refs.pdf"])
+def test_summary_comparison(file_path):
+    # Test new summarizer
+    summarizer_new = HierarchicalSummary(
+        file_link=file_path,
+        content_types=True
+    )
+    summary_new, _ = summarizer_new()
+    print(f"New paper summary: \n {summary_new.summary} \n {summary_new.facts}")
+
+    # Test old summarizer
+    summarizer_old = HierarchicalSummaryOldBasic(file_link=file_path)
+    summary_old, _ = summarizer_old()
+    print(f"Old paper summary: \n {summary_old.summary} \n {summary_old.facts}")
+
+    comparison = Symbol(f"Does the new summary include as detailed information as the old summary?"
+                         + f"\nIs the new summary of the same or better calibre than the old summary?"
+                         + f"\nDoes the new summary include the title, authors, and publication details?"
+                         + f"\nDoes the new summary include the main topic and scope?"
+                         + f"\nDoes the new summary include key statements, contributions, main results, and important references?"
+                         + f"\nDoes the new summary focus on methodology and findings?"
+                         + f"\nReturn yes or no as an overall answer and then explain the answer to each question."
                          + f"\nNew summary: {summary_new}"
                          + f"\nOld summary: {summary_old}").interpret()
     

@@ -7,6 +7,7 @@ from pydantic import BaseModel, field_validator
 
 from symai.components import FileReader, Function, ValidatedFunction
 from symai.core_ext import bind
+import tempfile
 
 
 class Summary(BaseModel):
@@ -17,31 +18,6 @@ class Summary(BaseModel):
 
 # TODO: move to symai
 class HierarchicalSummary(ValidatedFunction):
-    # Define the prompt types as class variables
-    base_prompts = {
-        "Paper": {
-            "base": "Extract the title, authors, and publication details. Identify the main topic and scope.",
-            "subtypes": {
-                "Scientific Paper": "Extract key statements, contributions, main results, and important references. Focus on methodology and findings.",
-                "Research Paper": "Focus on research questions, methodology, data analysis, and conclusions. Include limitations and future work.",
-                "Review Paper": "Highlight the reviewed topics, key findings from literature, and synthesis of current knowledge."
-            }
-        },
-        "Presentation": {
-            "base": "Identify the presenter, target audience, and overall structure.",
-            "subtypes": {
-                "Keynote": "Include speaker details and their expertise. Highlight key messages and main takeaways.",
-                "Presentation Slides": "Determine if this is a motivational talk, results presentation, or idea/pitch. For motivational talks, focus on key messages and call-to-action. For result presentations, emphasize numerical results and achievements. For idea/pitch presentations, highlight the core idea and value proposition."
-            }
-        }
-    }
-
-    standalone_prompts = {
-        "Interview": "Identify and distinguish between different speakers. Include key quotes and main discussion points.",
-        "Report": "Highlight numerical results, key statistics, and main takeaways. Include significant findings and conclusions.",
-        "Book": "Include author information, main plot points, and key character descriptions. Highlight character development and relationships.",
-    }
-
     def __init__(
         self,
         file_link: str = None,
@@ -80,6 +56,7 @@ class HierarchicalSummary(ValidatedFunction):
             file_name = asset_name
             file_content = str(content)
         self.content = f"[[ASSET::{file_name}]]: <<<\n{str(file_content)}\n>>>\n"
+        self.content_only = str(file_content)
 
     def read_file(self, file_link: str):
         self.print_verbose(f"Reading file from {file_link}")
@@ -91,31 +68,21 @@ class HierarchicalSummary(ValidatedFunction):
 
     def download_file(self, file_link: str):
         self.print_verbose(f"Downloading file from {file_link}")
+        
+        
         with urllib.request.urlopen(file_link) as f:
-            content = f.read().decode("utf-8")
-            file_name = urllib.parse.urlparse(file_link).path
-            val = f"[[ASSET::{file_name}]]: <<<\n{str(content)}\n>>>\n"
-            return val, file_name
+            with tempfile.NamedTemporaryFile(delete=False) as tmp_file:
+                tmp_file.write(f.read())
+                tmp_file.flush()
+                tmp_file_name = tmp_file.name
+
+        content, file_name = self.read_file(tmp_file_name)
+        os.remove(tmp_file_name)
+        return content, file_name
+
 
     @property
     def prompt(self):
-        # Get type-specific prompt
-        type_prompt = ""
-        if self.content_types is not None and hasattr(self, '_content_type'):
-            content_type = self._content_type
-            
-            # Check if this is a subtype
-            for base_type, base_info in self.base_prompts.items():
-                if content_type in base_info["subtypes"]:
-                    # Combine base prompt with subtype prompt
-                    type_prompt = f"\nFor this {content_type}:\n"
-                    type_prompt += f"- {base_info['base']}\n"
-                    type_prompt += f"- {base_info['subtypes'][content_type]}"
-                    break
-            # If not found in subtypes, check standalone prompts
-            if not type_prompt and content_type in self.standalone_prompts:
-                type_prompt = f"\nFor this {content_type}: {self.standalone_prompts[content_type]}"
-
         return (
             f"Create a comprehensive summary of the provided content and return the result as JSON.\n"
             + (
@@ -123,8 +90,7 @@ class HierarchicalSummary(ValidatedFunction):
                 if self.content_types is not None
                 else ""
             )
-            + type_prompt  # Add the type-specific prompt
-            + "\nThe summary must be in the language specified in [[CONTENT LANGUAGE]], regardless of the source material.\n"
+            + "The summary must be in the language specified in [[CONTENT LANGUAGE]], regardless of the source material.\n"
             + f"Extract important facts from the text and return them in a list in JSON format as 'facts'.\n"
             + f"[[IMPORTANT]] Ensure that the summary is consistent with the facts. Do not add information not contained in the text.\n"
             + r'JSON schema: {"summary": "string", "facts": "array of strings"}'
@@ -263,34 +229,22 @@ class HierarchicalSummary(ValidatedFunction):
 
     def get_asset_type(self, content):
         if self.content_types is not None:
-            # Flatten the allowed types to include both base types and subtypes
-            allowed_types = set()
-            for base_type, base_info in self.base_prompts.items():
-                allowed_types.add(base_type)
-                allowed_types.update(base_info["subtypes"].keys())
-            allowed_types.update(self.standalone_prompts.keys())
-
+            # construct pydantic BaseModel for content types
             class ContentType(BaseModel):
                 type: str
 
                 @field_validator("type")
                 def validate_type(cls, v):
-                    assert v in allowed_types, f"Type must be one of: {', '.join(sorted(allowed_types))}"
+                    assert v in self.content_types
                     return v
 
-            # construct function to determine asset type
+            # construct function to determine asset type, use ValidatedFunction to restrict to allowed types
             asset_type_func = ValidatedFunction(
                 data_model=ContentType,
                 retry_count=self.retry_count,
                 prompt="What type of content is this text?\n"
-                + f"Allowed types: {', '.join(sorted(allowed_types))}\n"
-                + "The content type must be mapped exactly/literally to one of the listed types. No other type allowed!\n\n"
-                + "Note: Some types are subtypes of others:\n"
-                + "\n".join(
-                    f"- {base_type}: {', '.join(base_info['subtypes'].keys())}"
-                    for base_type, base_info in self.base_prompts.items()
-                    if base_info['subtypes']
-                ),
+                + f"Allowed types: {', '.join(self.content_types)}\n"
+                + "The content type must be mapped exactly/literally to one of the listed types. No other type allowed!\n\n",
                 static_context=r"Return JSON: {'type': string}",
             )
 
@@ -301,9 +255,7 @@ class HierarchicalSummary(ValidatedFunction):
                 seed=self.seed,
             )
 
-            # Store the content type for use in prompt
-            self._content_type = res.type
-
+            # add to overall usage
             self.add_usage(usage)
             return res.type
         else:
@@ -366,8 +318,8 @@ class HierarchicalSummary(ValidatedFunction):
             res = Summary(
                 summary=data,
                 facts=facts,
-                type=asset_type,
             )
+            res.type = asset_type
             return res, self.get_usage()
         else:
             asset_type = self.get_asset_type(self.content)
