@@ -51,6 +51,7 @@ class HierarchicalSummary(ValidatedFunction):
         min_chunk_size: int = 250,
         max_output_tokens: int = 10000,
         content_types: List[str] = None,
+        user_prompt: str = None,
         seed: int = 42,
         *args,
         **kwargs,
@@ -67,6 +68,7 @@ class HierarchicalSummary(ValidatedFunction):
         self.min_chunk_size = min_chunk_size
         self.max_output_tokens = max_output_tokens
         self.content_types = content_types
+        self.user_prompt = user_prompt
         self.seed = seed
 
         file_content = None
@@ -117,17 +119,27 @@ class HierarchicalSummary(ValidatedFunction):
                 type_prompt = f"\nFor this {content_type}: {self.standalone_prompts[content_type]}"
 
         return (
-            f"Create a comprehensive summary of the provided content and return the result as JSON.\n"
+            f"[Summary Generation Task]\n\n"
+            + "[Main Objective]\n"
+            + "Create a comprehensive summary of the provided content and return the result as JSON.\n\n"
             + (
-                f"The type of the provided content is specified in [CONTENT TYPE].\n"
+                "[Content Type]\n"
+                + "The type of the provided content is specified in [[CONTENT TYPE]].\n\n"
                 if self.content_types is not None
                 else ""
             )
+            + "[Type-Specific Instructions]\n"
             + type_prompt  # Add the type-specific prompt
-            + "\nThe summary must be in the language specified in [[CONTENT LANGUAGE]], regardless of the source material.\n"
-            + f"Extract important facts from the text and return them in a list in JSON format as 'facts'.\n"
-            + f"[[IMPORTANT]] Ensure that the summary is consistent with the facts. Do not add information not contained in the text.\n"
-            + r'JSON schema: {"summary": "string", "facts": "array of strings"}'
+            + "[User Instructions]\n"
+            + self.custom_prompt
+            + "\n[Language Requirements]\n"
+            + "The summary must be in the language specified in [[CONTENT LANGUAGE]], regardless of the source material.\n\n"
+            + "[Key Requirements]\n"
+            + "- Extract important facts from the text and return them in a list in JSON format as 'facts'\n"
+            + "- **IMPORTANT**: Ensure that the summary is consistent with the facts\n"
+            + "- Do not add information not contained in the text\n\n"
+            + "[Output Format]\n"
+            + r'JSON schema: {"summary": "string", "facts": "array of strings"}\n'
         )
 
     @property
