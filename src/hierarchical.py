@@ -127,6 +127,10 @@ class HierarchicalSummary(ValidatedFunction):
             if not type_prompt and content_type in self.standalone_prompts:
                 type_prompt = f"\nFor this {content_type}: {self.standalone_prompts[content_type]}"
 
+        if self.user_prompt is not None:
+            user_prompt = "Given the following information, extract important related information from the text and add them to the list of facts."
+            user_prompt += "\n" + self.user_prompt
+            
         return (
             f"[Summary Generation Task]\n\n"
             + "[Main Objective]\n"
@@ -140,7 +144,7 @@ class HierarchicalSummary(ValidatedFunction):
             + "[Type-Specific Instructions]\n"
             + type_prompt  # Add the type-specific prompt
             + "[User Instructions]\n"
-            + self.custom_prompt
+            + user_prompt
             + "\n[Language Requirements]\n"
             + "The summary must be in the language specified in [[CONTENT LANGUAGE]], regardless of the source material.\n\n"
             + "[Key Requirements]\n"
