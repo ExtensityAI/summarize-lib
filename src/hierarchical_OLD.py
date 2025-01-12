@@ -1,6 +1,6 @@
 import os
 import re
-from typing import List
+from typing import List, Optional
 import urllib.request
 
 from pydantic import BaseModel, field_validator
@@ -13,6 +13,7 @@ class Summary(BaseModel):
     summary: str
     facts: List[str]
     type: str = None
+    quotes: Optional[List[str]] = None
 
 
 # TODO: move to symai
@@ -26,6 +27,7 @@ class HierarchicalSummary(ValidatedFunction):
         min_chunk_size: int = 250,
         max_output_tokens: int = 10000,
         content_types: List[str] = None,
+        include_quotes: bool = False,
         seed: int = 42,
         *args,
         **kwargs,
@@ -36,6 +38,7 @@ class HierarchicalSummary(ValidatedFunction):
         if content is not None:
             assert asset_name is not None
 
+        self.include_quotes = include_quotes
         super().__init__(data_model=Summary, retry_count=5, *args, **kwargs)
         self.file_link = file_link
         self.min_num_chunks = min_num_chunks
@@ -77,7 +80,7 @@ class HierarchicalSummary(ValidatedFunction):
         type_specific_prompts = {
             "Interview": "Identify and distinguish between different speakers. Include key quotes and main discussion points.",
             "Keynote": "Include speaker details and their expertise. Highlight key messages and main takeaways.",
-            "Scientific Paper": "Extract key statements, contributions, main results, and important references. Focus on methodology and findings.",
+            "Scientific/Research Paper": "Extract key statements, contributions, main results, and important references. Focus on methodology and findings.",
             "Report": "Highlight numerical results, key statistics, and main takeaways. Include significant findings and conclusions.",
             "Book": "Include author information, main plot points, and key character descriptions. Highlight character development and relationships.",
             "Presentation Slides": "Determine if this is a motivational talk, results presentation, or idea/pitch. For motivational talks, focus on key messages and call-to-action. For result presentations, emphasize numerical results and achievements. For idea/pitch presentations, highlight the core idea and value proposition."
@@ -90,19 +93,32 @@ class HierarchicalSummary(ValidatedFunction):
             if content_type in type_specific_prompts:
                 type_prompt = f"\nFor this {content_type}: {type_specific_prompts[content_type]}"
 
-        return (
+        prompt_text = (
             f"Create a comprehensive summary of the provided content and return the result as JSON.\n"
             + (
                 f"The type of the provided content is specified in [CONTENT TYPE].\n"
                 if self.content_types is not None
                 else ""
             )
-            + type_prompt  # Add the type-specific prompt
+            + type_prompt
             + "\nThe summary must be in the language specified in [[CONTENT LANGUAGE]], regardless of the source material.\n"
             + f"Extract important facts from the text and return them in a list in JSON format as 'facts'.\n"
-            + f"[[IMPORTANT]] Ensure that the summary is consistent with the facts. Do not add information not contained in the text.\n"
-            + r'JSON schema: {"summary": "string", "facts": "array of strings"}'
+            + (
+                "- Extract significant quotes that support the main points and return them in a list in JSON format as 'quotes'\n"
+                if self.include_quotes
+                else ""
+            )
+            + f"**IMPORTANT**: Ensure that the summary is consistent with the facts. Do not add information not contained in the text.\n"
+            + (
+                "[Output Format]\n"
+                + r'JSON schema: {"summary": "string", "facts": "array of strings"'
+                + (', "quotes": "array of strings"' if self.include_quotes else '')
+                + "}\n"
+            )
+            + "\n\n"
         )
+
+        return prompt_text
 
     @property
     def static_context(self):
@@ -202,6 +218,7 @@ class HierarchicalSummary(ValidatedFunction):
     def summarize_chunks(self, chunks):
         chunk_summaries = []
         chunk_facts = []
+        chunk_quotes = []
 
         for chunk in chunks:
             res, usage = super().forward(
@@ -211,10 +228,13 @@ class HierarchicalSummary(ValidatedFunction):
             )
             chunk_summaries.append(res.summary)
             chunk_facts.extend(res.facts)
+            if hasattr(res, 'quotes') and res.quotes:
+                chunk_quotes.extend(res.quotes)
 
         res = Summary(
             summary="\n".join(chunk_summaries),
             facts=chunk_facts,
+            quotes=chunk_quotes if chunk_quotes else None,
         )
         return res, self.compute_required_tokens(res.summary, count_context=False)
 
@@ -307,6 +327,7 @@ class HierarchicalSummary(ValidatedFunction):
             summary_token_count = self._max_context_tokens() + 1
             data = self.content
             facts = None
+            quotes = None
             asset_type = None
 
             while summary_token_count > self.max_output_tokens:
@@ -323,12 +344,14 @@ class HierarchicalSummary(ValidatedFunction):
                 # store facts from first summarization pass, do not overwrite
                 if facts is None:
                     facts = res.facts
+                    quotes = res.quotes
 
             # collect and return results
             res = Summary(
                 summary=data,
                 facts=facts,
                 type=asset_type,
+                quotes=quotes,
             )
             return res, self.get_usage()
         else:

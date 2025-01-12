@@ -1,6 +1,6 @@
 import os
 import re
-from typing import List
+from typing import List, Optional
 import urllib.request
 
 from pydantic import BaseModel, field_validator
@@ -14,6 +14,7 @@ class Summary(BaseModel):
     summary: str
     facts: List[str]
     type: str = None
+    quotes: Optional[List[str]] = None
 
 
 # TODO: move to symai
@@ -27,6 +28,7 @@ class HierarchicalSummary(ValidatedFunction):
         min_chunk_size: int = 250,
         max_output_tokens: int = 10000,
         content_types: List[str] = None,
+        include_quotes: bool = False,
         seed: int = 42,
         *args,
         **kwargs,
@@ -37,6 +39,7 @@ class HierarchicalSummary(ValidatedFunction):
         if content is not None:
             assert asset_name is not None
 
+        self.include_quotes = include_quotes
         super().__init__(data_model=Summary, retry_count=5, *args, **kwargs)
         self.file_link = file_link
         self.min_num_chunks = min_num_chunks
@@ -92,8 +95,17 @@ class HierarchicalSummary(ValidatedFunction):
             )
             + "The summary must be in the language specified in [[CONTENT LANGUAGE]], regardless of the source material.\n"
             + f"Extract important facts from the text and return them in a list in JSON format as 'facts'.\n"
+            + (
+                "Extract significant quotes that support the main points and return them in a list in JSON format as 'quotes'.\n"
+                if self.include_quotes
+                else ""
+            )
             + f"[[IMPORTANT]] Ensure that the summary is consistent with the facts. Do not add information not contained in the text.\n"
-            + r'JSON schema: {"summary": "string", "facts": "array of strings"}'
+            + (
+                r'JSON schema: {"summary": "string", "facts": "array of strings"'
+                + (', "quotes": "array of strings"' if self.include_quotes else '')
+                + "}"
+            )
         )
 
     @property
@@ -194,6 +206,7 @@ class HierarchicalSummary(ValidatedFunction):
     def summarize_chunks(self, chunks):
         chunk_summaries = []
         chunk_facts = []
+        chunk_quotes = []
 
         for chunk in chunks:
             res, usage = super().forward(
@@ -203,10 +216,13 @@ class HierarchicalSummary(ValidatedFunction):
             )
             chunk_summaries.append(res.summary)
             chunk_facts.extend(res.facts)
+            if hasattr(res, 'quotes') and res.quotes:
+                chunk_quotes.extend(res.quotes)
 
         res = Summary(
             summary="\n".join(chunk_summaries),
             facts=chunk_facts,
+            quotes=chunk_quotes if chunk_quotes else None,
         )
         return res, self.compute_required_tokens(res.summary, count_context=False)
 
@@ -297,6 +313,7 @@ class HierarchicalSummary(ValidatedFunction):
             summary_token_count = self._max_context_tokens() + 1
             data = self.content
             facts = None
+            quotes = None
             asset_type = None
 
             while summary_token_count > self.max_output_tokens:
@@ -313,13 +330,15 @@ class HierarchicalSummary(ValidatedFunction):
                 # store facts from first summarization pass, do not overwrite
                 if facts is None:
                     facts = res.facts
+                    quotes = res.quotes
 
             # collect and return results
             res = Summary(
                 summary=data,
                 facts=facts,
+                type=asset_type,
+                quotes=quotes,
             )
-            res.type = asset_type
             return res, self.get_usage()
         else:
             asset_type = self.get_asset_type(self.content)

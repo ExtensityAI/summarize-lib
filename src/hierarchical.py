@@ -1,6 +1,6 @@
 import os
 import re
-from typing import List
+from typing import List, Optional
 import urllib.request
 
 from pydantic import BaseModel, field_validator
@@ -13,7 +13,8 @@ import tempfile
 class Summary(BaseModel):
     summary: str
     facts: List[str]
-    type: str = None
+    type: Optional[str] = None
+    quotes: Optional[List[str]] = None
 
 
 # TODO: move to symai
@@ -23,8 +24,7 @@ class HierarchicalSummary(ValidatedFunction):
         "Paper": {
             "base": "Extract the title, authors, and publication details. Identify the main topic and scope.",
             "subtypes": {
-                "Scientific Paper": "Extract key statements, contributions, main results, and important references. Focus on methodology and findings.",
-                "Research Paper": "Focus on research questions, methodology, data analysis, and conclusions. Include limitations and future work.",
+                "Scientific/Research Paper": "Extract key statements, contributions, main results, and important references. Focus on research questions, methodology, data analysis, findings, and conclusions. Include limitations, future work, and important references.",
                 "Review Paper": "Highlight the reviewed topics, key findings from literature, and synthesis of current knowledge."
             }
         },
@@ -53,6 +53,7 @@ class HierarchicalSummary(ValidatedFunction):
         max_output_tokens: int = 10000,
         content_types: List[str] = None,
         user_prompt: str = None,
+        include_quotes: bool = False,
         seed: int = 42,
         *args,
         **kwargs,
@@ -63,6 +64,7 @@ class HierarchicalSummary(ValidatedFunction):
         if content is not None:
             assert asset_name is not None
 
+        self.include_quotes = include_quotes
         super().__init__(data_model=Summary, retry_count=5, *args, **kwargs)
         self.file_link = file_link
         self.min_num_chunks = min_num_chunks
@@ -131,7 +133,7 @@ class HierarchicalSummary(ValidatedFunction):
             user_prompt = "Given the following information, extract important related information from the text and add them to the list of facts."
             user_prompt += "\n" + self.user_prompt
             
-        return (
+        prompt_text = (
             f"[Summary Generation Task]\n\n"
             + "[Main Objective]\n"
             + "Create a comprehensive summary of the provided content and return the result as JSON.\n\n"
@@ -142,18 +144,36 @@ class HierarchicalSummary(ValidatedFunction):
                 else ""
             )
             + "[Type-Specific Instructions]\n"
-            + type_prompt  # Add the type-specific prompt
-            + "[User Instructions]\n"
-            + user_prompt
+            + type_prompt
+            + "\nInformation relevant to the type of content should be stored in the list of facts."
+            + (
+                f"[User Instructions]\n"
+                + user_prompt
+                + "\nInformation relevant to the user should be used to modify the information contained in the summary and list of facts."
+                if self.user_prompt is not None
+                else ""
+            )
             + "\n[Language Requirements]\n"
             + "The summary must be in the language specified in [[CONTENT LANGUAGE]], regardless of the source material.\n\n"
             + "[Key Requirements]\n"
             + "- Extract important facts from the text and return them in a list in JSON format as 'facts'\n"
-            + "- **IMPORTANT**: Ensure that the summary is consistent with the facts\n"
-            + "- Do not add information not contained in the text\n\n"
-            + "[Output Format]\n"
-            + r'JSON schema: {"summary": "string", "facts": "array of strings"}\n'
+            + (
+                "- Extract significant quotes that support the main points and return them in a list in JSON format as 'quotes'\n"
+                + "- The quotes should be chosen based on relevancy to the type-specific and user instructions, especially if a particular audience is specified\n"
+                if self.include_quotes
+                else ""
+            )
+            + "- **IMPORTANT**: Ensure that the summary is consistent with the facts. Do not add information not contained in the text.\n"
+            + (
+                "[Output Format]\n"
+                + r'JSON schema: {"summary": "string", "facts": "array of strings"'
+                + (', "quotes": "array of strings"' if self.include_quotes else '')
+                + "}\n"
+            )
+            + "\n\n"
         )
+
+        return prompt_text
 
     @property
     def static_context(self):
@@ -253,6 +273,7 @@ class HierarchicalSummary(ValidatedFunction):
     def summarize_chunks(self, chunks):
         chunk_summaries = []
         chunk_facts = []
+        chunk_quotes = []
 
         for chunk in chunks:
             res, usage = super().forward(
@@ -262,10 +283,13 @@ class HierarchicalSummary(ValidatedFunction):
             )
             chunk_summaries.append(res.summary)
             chunk_facts.extend(res.facts)
+            if res.quotes:
+                chunk_quotes.extend(res.quotes)
 
         res = Summary(
             summary="\n".join(chunk_summaries),
             facts=chunk_facts,
+            quotes=chunk_quotes,
         )
         return res, self.compute_required_tokens(res.summary, count_context=False)
 
@@ -370,6 +394,7 @@ class HierarchicalSummary(ValidatedFunction):
             summary_token_count = self._max_context_tokens() + 1
             data = self.content
             facts = None
+            quotes = None
             asset_type = None
 
             while summary_token_count > self.max_output_tokens:
@@ -383,15 +408,17 @@ class HierarchicalSummary(ValidatedFunction):
                 res, summary_token_count = self.summarize_chunks(chunks)
                 data = res.summary
 
-                # store facts from first summarization pass, do not overwrite
+                # store facts and quotes from first summarization pass, do not overwrite
                 if facts is None:
                     facts = res.facts
+                    quotes = res.quotes
 
             # collect and return results
             res = Summary(
                 summary=data,
                 facts=facts,
                 type=asset_type,
+                quotes=quotes,
             )
             return res, self.get_usage()
         else:
