@@ -23,7 +23,7 @@ class HierarchicalSummary(ValidatedFunction):
         self,
         file_link: str = None,
         content: str = None,
-        asset_name: str = None,
+        document_name: str = None,
         min_num_chunks: int = 5,
         min_chunk_size: int = 250,
         max_output_tokens: int = 10000,
@@ -37,7 +37,7 @@ class HierarchicalSummary(ValidatedFunction):
         assert (file_link and not content) or (content and not file_link)
 
         if content is not None:
-            assert asset_name is not None
+            assert document_name is not None
 
         self.include_quotes = include_quotes
         super().__init__(data_model=Summary, retry_count=5, *args, **kwargs)
@@ -56,7 +56,7 @@ class HierarchicalSummary(ValidatedFunction):
             else:
                 file_content, file_name = self.read_file(file_link)
         else:
-            file_name = asset_name
+            file_name = document_name
             file_content = str(content)
         self.content = f"[[ASSET::{file_name}]]: <<<\n{str(file_content)}\n>>>\n"
         self.content_only = str(file_content)

@@ -1,13 +1,16 @@
 import os
 import re
-from typing import List, Optional
+import tempfile
 import urllib.request
+from textwrap import dedent
+from typing import List, Optional
 
+from loguru import logger
 from pydantic import BaseModel, field_validator
-
 from symai.components import FileReader, Function, ValidatedFunction
 from symai.core_ext import bind
-import tempfile
+
+from .types import TYPE_SPECIFIC_PROMPTS, DocumentType
 
 
 class Summary(BaseModel):
@@ -20,38 +23,14 @@ class Summary(BaseModel):
 # TODO: move to symai
 class HierarchicalSummary(ValidatedFunction):
     # Define the prompt types as class variables
-    base_prompts = {
-        "Paper": {
-            "base": "Extract the title, authors, and publication details. Identify the main topic and scope.",
-            "subtypes": {
-                "Scientific/Research Paper": "Extract key statements, contributions, main results, and important references. Focus on research questions, methodology, data analysis, findings, and conclusions. Include limitations, future work, and important references.",
-                "Review Paper": "Highlight the reviewed topics, key findings from literature, and synthesis of current knowledge."
-            }
-        },
-        "Presentation": {
-            "base": "Identify the presenter, target audience, and overall structure.",
-            "subtypes": {
-                "Keynote": "Include speaker details and their expertise. Highlight key messages and main takeaways.",
-                "Presentation Slides": "Determine if this is a motivational talk, results presentation, or idea/pitch. For motivational talks, focus on key messages and call-to-action. For result presentations, emphasize numerical results and achievements. For idea/pitch presentations, highlight the core idea and value proposition."
-            }
-        }
-    }
-
-    standalone_prompts = {
-        "Interview": "Identify and distinguish between different speakers. Include key quotes and main discussion points.",
-        "Report": "Highlight numerical results, key statistics, and main takeaways. Include significant findings and conclusions.",
-        "Book": "Include author information, main plot points, and key character descriptions. Highlight character development and relationships.",
-    }
-
     def __init__(
         self,
         file_link: str = None,
         content: str = None,
-        asset_name: str = None,
+        document_name: str = None,
         min_num_chunks: int = 5,
         min_chunk_size: int = 250,
         max_output_tokens: int = 10000,
-        content_types: List[str] = None,
         user_prompt: str = None,
         include_quotes: bool = False,
         seed: int = 42,
@@ -62,16 +41,15 @@ class HierarchicalSummary(ValidatedFunction):
         assert (file_link and not content) or (content and not file_link)
 
         if content is not None:
-            assert asset_name is not None
+            assert document_name is not None
 
-        self.include_quotes = include_quotes
         super().__init__(data_model=Summary, retry_count=5, *args, **kwargs)
         self.file_link = file_link
         self.min_num_chunks = min_num_chunks
         self.min_chunk_size = min_chunk_size
         self.max_output_tokens = max_output_tokens
-        self.content_types = content_types
         self.user_prompt = user_prompt
+        self.include_quotes = include_quotes
         self.seed = seed
 
         file_content = None
@@ -82,23 +60,25 @@ class HierarchicalSummary(ValidatedFunction):
             else:
                 file_content, file_name = self.read_file(file_link)
         else:
-            file_name = asset_name
+            file_name = document_name
             file_content = str(content)
-        self.content = f"[[ASSET::{file_name}]]: <<<\n{str(file_content)}\n>>>\n"
+        self.content = f"[[DOCUMENT::{file_name}]]: <<<\n{str(file_content)}\n>>>\n"
         self.content_only = str(file_content)
+
+        # Content type is unknown at initialization
+        self.document_type = None
 
     def read_file(self, file_link: str):
         self.print_verbose(f"Reading file from {file_link}")
         reader = FileReader()
         content = reader(file_link)
         file_name = os.path.basename(file_link)
-        val = f"[[ASSET::{file_name}]]: <<<\n{str(content)}\n>>>\n"
+        val = f"[[DOCUMENT::{file_name}]]: <<<\n{str(content)}\n>>>\n"
         return val, file_name
 
     def download_file(self, file_link: str):
         self.print_verbose(f"Downloading file from {file_link}")
-        
-        
+
         with urllib.request.urlopen(file_link) as f:
             with tempfile.NamedTemporaryFile(delete=False) as tmp_file:
                 tmp_file.write(f.read())
@@ -109,78 +89,68 @@ class HierarchicalSummary(ValidatedFunction):
         os.remove(tmp_file_name)
         return content, file_name
 
-
     @property
     def prompt(self):
         # Get type-specific prompt
-        type_prompt = ""
-        if self.content_types is not None and hasattr(self, '_content_type'):
-            content_type = self._content_type
-            
-            # Check if this is a subtype
-            for base_type, base_info in self.base_prompts.items():
-                if content_type in base_info["subtypes"]:
-                    # Combine base prompt with subtype prompt
-                    type_prompt = f"\nFor this {content_type}:\n"
-                    type_prompt += f"- {base_info['base']}\n"
-                    type_prompt += f"- {base_info['subtypes'][content_type]}"
-                    break
-            # If not found in subtypes, check standalone prompts
-            if not type_prompt and content_type in self.standalone_prompts:
-                type_prompt = f"\nFor this {content_type}: {self.standalone_prompts[content_type]}"
+        type_specific_prompt = ""
+        if self.document_type and self.document_type in TYPE_SPECIFIC_PROMPTS:
+            type_specific_prompt = dedent(
+                f"""[Type-Specific Instructions]
+            For this {self.document_type.value}: {TYPE_SPECIFIC_PROMPTS[self.document_type]}"""
+            )
 
         if self.user_prompt is not None:
-            user_prompt = "Given the following information, extract important related information from the text and add them to the list of facts."
-            user_prompt += "\n" + self.user_prompt
+            user_prompt = dedent(
+                f"""[Goal-specific Instructions]
+            This summary is intended for a specific audience or purpose.
+            Given the following details, ensure that the summary and the list of facts are tailored to the user's needs and contain all relevant information.
+                        
+            >>>
+            {self.user_prompt}
+            <<<"""
+            )
+
+        prompt_text = dedent(
+            f"""
+            [[Document Processing Task]]
+
+            [Main Objective]
+            Create a comprehensive summary of the provided content and return the result as JSON.
+            The type of the provided content is specified in [[CONTENT TYPE]].
+            Information relevant to the type of content should be stored in the list of facts.   
+                     
+            {type_specific_prompt}
+                     
+            {user_prompt if self.user_prompt is not None else ""}
+                        
+            [Language Requirements]
+            The summary must be in the language specified in [[CONTENT LANGUAGE]], regardless of the source material.
+
+            [Key Requirements]
+            - Summarize the content in a clear and concise manner, ensuring that all relevant points are captured.
+            - Extract important facts from the text and return them in a list in JSON format as 'facts'.            
+            - **IMPORTANT**: Ensure that the summary is consistent with the facts. Do not add information not contained in the document.
+            {"- Extract significant quotes that support the main points and return them in a list in JSON format as 'quotes'" if self.include_quotes else ""}
+            {"- The quotes should be chosen based on relevancy to the type-specific and user instructions, especially if a particular audience is specified" if self.include_quotes else ""}
             
-        prompt_text = (
-            f"[Summary Generation Task]\n\n"
-            + "[Main Objective]\n"
-            + "Create a comprehensive summary of the provided content and return the result as JSON.\n\n"
-            + (
-                "[Content Type]\n"
-                + "The type of the provided content is specified in [[CONTENT TYPE]].\n\n"
-                if self.content_types is not None
-                else ""
-            )
-            + "[Type-Specific Instructions]\n"
-            + type_prompt
-            + "\nInformation relevant to the type of content should be stored in the list of facts."
-            + (
-                f"[User Instructions]\n"
-                + user_prompt
-                + "\nInformation relevant to the user should be used to modify the information contained in the summary and list of facts."
-                if self.user_prompt is not None
-                else ""
-            )
-            + "\n[Language Requirements]\n"
-            + "The summary must be in the language specified in [[CONTENT LANGUAGE]], regardless of the source material.\n\n"
-            + "[Key Requirements]\n"
-            + "- Extract important facts from the text and return them in a list in JSON format as 'facts'\n"
-            + (
-                "- Extract significant quotes that support the main points and return them in a list in JSON format as 'quotes'\n"
-                + "- The quotes should be chosen based on relevancy to the type-specific and user instructions, especially if a particular audience is specified\n"
-                if self.include_quotes
-                else ""
-            )
-            + "- **IMPORTANT**: Ensure that the summary is consistent with the facts. Do not add information not contained in the text.\n"
-            + (
-                "[Output Format]\n"
-                + r'JSON schema: {"summary": "string", "facts": "array of strings"'
-                + (', "quotes": "array of strings"' if self.include_quotes else '')
-                + "}\n"
-            )
-            + "\n\n"
+            [Output Format]
+            JSON schema: {{"summary": "string", 
+            "facts": "array of strings" 
+            {', "quotes": "array of strings"' if self.include_quotes else ""}}}
+        """
         )
 
+        logger.debug(prompt_text)
         return prompt_text
 
     @property
     def static_context(self):
-        return (
-            "Create a comprehensive summary of the provided text and extract important facts.\n"
-            + "The summary must be in the same language as the text.\n"
-            + "Return the summary in JSON format with the provided JSON schema.\n"
+        return dedent(
+            """
+            Create a comprehensive summary of the provided text and extract important facts.
+            The summary must be in the same language as the text.
+            Return the summary in JSON format with the provided JSON schema.
+        """
         )
 
     @bind(engine="neurosymbolic", property="compute_required_tokens")(lambda: 0)
@@ -310,68 +280,63 @@ class HierarchicalSummary(ValidatedFunction):
         else:
             return self.min_chunk_size
 
-    def get_asset_type(self, content):
-        if self.content_types is not None:
-            # Flatten the allowed types to include both base types and subtypes
-            allowed_types = set()
-            for base_type, base_info in self.base_prompts.items():
-                allowed_types.add(base_type)
-                allowed_types.update(base_info["subtypes"].keys())
-            allowed_types.update(self.standalone_prompts.keys())
+    def get_document_type(self, content):
+        # Prepare a list of all values in the enum DocumentType
+        allowed_types = [doc_type.value for doc_type in DocumentType]
 
-            class ContentType(BaseModel):
-                type: str
+        class ContentType(BaseModel):
+            type: str
 
-                @field_validator("type")
-                def validate_type(cls, v):
-                    assert v in allowed_types, f"Type must be one of: {', '.join(sorted(allowed_types))}"
-                    return v
+            @field_validator("type")
+            def validate_type(cls, v):
+                assert (
+                    v in allowed_types
+                ), f"Type must be one of: {', '.join(sorted(allowed_types))}"
+                return v
 
-            # construct function to determine asset type
-            asset_type_func = ValidatedFunction(
-                data_model=ContentType,
-                retry_count=self.retry_count,
-                prompt="What type of content is this text?\n"
+        # construct function to determine document type
+        doc_type_func = ValidatedFunction(
+            data_model=ContentType,
+            retry_count=self.retry_count,
+            prompt=(
+                "What type of content is this text?\n"
                 + f"Allowed types: {', '.join(sorted(allowed_types))}\n"
                 + "The content type must be mapped exactly/literally to one of the listed types. No other type allowed!\n\n"
-                + "Note: Some types are subtypes of others:\n"
-                + "\n".join(
-                    f"- {base_type}: {', '.join(base_info['subtypes'].keys())}"
-                    for base_type, base_info in self.base_prompts.items()
-                    if base_info['subtypes']
-                ),
-                static_context=r"Return JSON: {'type': string}",
-            )
+            ),
+            static_context=r"Return JSON: {'type': string}",
+        )
 
-            res, usage = asset_type_func(
-                content,
-                preview=False,
-                response_format={"type": "json_object"},
-                seed=self.seed,
-            )
+        res, usage = doc_type_func(
+            content,
+            preview=False,
+            response_format={"type": "json_object"},
+            seed=self.seed,
+        )
 
-            # Store the content type for use in prompt
-            self._content_type = res.type
+        # Store the content type for use in prompt
 
-            self.add_usage(usage)
-            return res.type
-        else:
-            return "Unknown"
-    
-    def get_asset_language(self, content):
+        self.document_type = DocumentType(res.type)
+
+        self.add_usage(usage)
+        return self.document_type
+
+    def get_document_language(self, content):
         class ContentLanguage(BaseModel):
             language: str
 
-        # construct function to determine asset type, use ValidatedFunction to restrict to allowed types
-        asset_type_func = ValidatedFunction(
+        # construct function to determine document language, use ValidatedFunction to restrict to allowed types
+        doc_lang_func = ValidatedFunction(
             data_model=ContentLanguage,
             retry_count=self.retry_count,
-            prompt="Which language is this text in?\n"
-            + "Follow the ISO 639 standard for language names, country and language codes; use string format: '[[language_name]] ([[country]]) [[language_code]]'\n",
+            prompt=dedent(
+                """Which language is this document in?
+            - Follow the ISO 639 standard for language names, country and language codes. 
+            - Use string format: '[[language_name]] ([[country]]) [[language_code]]'"""
+            ),
             static_context=r"Return JSON: {'language': string}",
         )
 
-        res, usage = asset_type_func(
+        res, usage = doc_lang_func(
             content,
             preview=False,
             response_format={"type": "json_object"},
@@ -395,15 +360,15 @@ class HierarchicalSummary(ValidatedFunction):
             data = self.content
             facts = None
             quotes = None
-            asset_type = None
+            doc_type = None
 
             while summary_token_count > self.max_output_tokens:
                 chunks = self.chunk_by_token_count(data, chunk_size)
-                if asset_type is None:
-                    asset_type = self.get_asset_type(chunks[0])
-                    asset_language = self.get_asset_language(chunks[0])
-                    self.adapt("[[CONTENT TYPE]]\n" + asset_type)
-                    self.adapt("[[CONTENT LANGUAGE]]\n" + asset_language)
+                if doc_type is None:
+                    doc_type = self.get_document_type(chunks[0])
+                    doc_lang = self.get_document_language(chunks[0])
+                    self.adapt("[[DOCUMENT TYPE]]\n" + doc_type.value)
+                    self.adapt("[[DOCUMENT LANGUAGE]]\n" + doc_lang)
 
                 res, summary_token_count = self.summarize_chunks(chunks)
                 data = res.summary
@@ -417,22 +382,22 @@ class HierarchicalSummary(ValidatedFunction):
             res = Summary(
                 summary=data,
                 facts=facts,
-                type=asset_type,
+                type=doc_type,
                 quotes=quotes,
             )
             return res, self.get_usage()
         else:
-            asset_type = self.get_asset_type(self.content)
-            asset_language = self.get_asset_language(self.content)
+            doc_type = self.get_document_type(self.content)
+            doc_lang = self.get_document_language(self.content)
 
-            self.adapt("[[CONTENT TYPE]]\n" + asset_type)
-            self.adapt("[[CONTENT LANGUAGE]]\n" + asset_language)
+            self.adapt("[[DOCUMENT TYPE]]\n" + doc_type.value)
+            self.adapt("[[DOCUMENT LANGUAGE]]\n" + doc_lang)
 
             res, usage = super().forward(
                 self.content,
                 preview=False,
                 response_format={"type": "json_object"},
             )
-            res.type = asset_type
+            res.type = doc_type
 
         return res, usage

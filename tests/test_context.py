@@ -1,11 +1,11 @@
 import pytest
 import time
 from symai import Symbol
-from hierarchical import HierarchicalSummary, Summary
-from hierarchical_OLD import HierarchicalSummary as HierarchicalSummaryOld
-from hierarchical_OLD import Summary as SummaryOld
-from hierarchical_OLD_BASIC import HierarchicalSummary as HierarchicalSummaryOldBasic
-from hierarchical_OLD_BASIC import Summary as SummaryOldBasic
+from src.hierarchical import HierarchicalSummary, Summary
+from src.hierarchical_OLD import HierarchicalSummary as HierarchicalSummaryOld
+from src.hierarchical_OLD import Summary as SummaryOld
+from src.hierarchical_OLD_BASIC import HierarchicalSummary as HierarchicalSummaryOldBasic
+from src.hierarchical_OLD_BASIC import Summary as SummaryOldBasic
 import logging
 from collections import defaultdict
 
@@ -69,7 +69,7 @@ KEYWORDS = {
 hits = defaultdict(lambda: {"old": 0, "new": 0})
 
 @pytest.mark.compare_facts
-@pytest.mark.parametrize("file_path", ["/Users/ryang/Work/ExtensityAI/summarize-lib/testfiles/Align-RUDDER.pdf"])
+@pytest.mark.parametrize("file_path", ["testfiles/Align-RUDDER.pdf"])
 def test_summary_comparison(file_path):
     num_runs = 10
     total_hits = defaultdict(lambda: {"old": 0, "new": 0})
@@ -80,7 +80,6 @@ def test_summary_comparison(file_path):
         # Test new summarizer
         summarizer_new = HierarchicalSummary(
             file_link=file_path,
-            content_types=True,
             user_prompt=str(CONTEXT)
         )
         summary_new, _ = summarizer_new()
@@ -122,7 +121,7 @@ def test_summary_comparison(file_path):
         f"New summarizer should show positive improvement (got {overall_improvement:.1f}%)"
 
 @pytest.mark.compare_quotes
-@pytest.mark.parametrize("file_path", ["/Users/ryang/Work/ExtensityAI/summarize-lib/testfiles/Align-RUDDER.pdf"])
+@pytest.mark.parametrize("file_path", ["testfiles/Align-RUDDER.pdf"])
 def test_quotes_comparison(file_path):
     num_runs = 10
     total_hits = defaultdict(lambda: {"old": 0, "new": 0})
@@ -133,7 +132,6 @@ def test_quotes_comparison(file_path):
         # Test new summarizer with quotes enabled
         summarizer_new = HierarchicalSummary(
             file_link=file_path,
-            content_types=True,
             user_prompt=str(CONTEXT),
             include_quotes=True
         )
@@ -207,7 +205,7 @@ def validate_keywords(output, field):
 
 
 @pytest.mark.compare_sentiment
-@pytest.mark.parametrize("file_path", ["/Users/ryang/Work/ExtensityAI/summarize-lib/testfiles/Align-RUDDER.pdf"])
+@pytest.mark.parametrize("file_path", ["testfiles/Align-RUDDER.pdf"])
 def test_sentiment_comparison(file_path):
     num_runs = 10
     summary_results = []
@@ -220,7 +218,6 @@ def test_sentiment_comparison(file_path):
         # Test new summarizer with quotes enabled
         summarizer_new = HierarchicalSummary(
             file_link=file_path,
-            content_types=True,
             user_prompt=str(CONTEXT),
             include_quotes=True
         )

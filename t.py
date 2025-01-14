@@ -1,19 +1,9 @@
-from hierarchical import HierarchicalSummary
-
-CONTENT_TYPES = [
-    "Interview",
-    "Keynote",
-    "Scientific Paper",
-    "Report",
-    "Book",
-    "Presentation Slides"
-]
+from src.hierarchical import HierarchicalSummary
 
 def test():
     # Test with local file
     summarizer = HierarchicalSummary(
-        file_link="/Users/ryang/Work/ExtensityAI/summarize-lib/testfiles/symbolicai_no_refs.pdf",
-        content_types=True
+        file_link="testfiles/symbolicai_no_refs.pdf"
     )
     summary, _ = summarizer()
     
