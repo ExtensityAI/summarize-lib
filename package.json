@@ -6,7 +6,11 @@
         {
             "module": "src/hierarchical",
             "type": "HierarchicalSummary"
+        },
+        {
+            "module": "src/types",
+            "type": "DocumentType"
         }
     ],
-    "dependencies": []
+    "dependencies": ["ExtensityAI/primitives-extend"]
 }

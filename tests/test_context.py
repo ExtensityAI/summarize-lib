@@ -1,13 +1,16 @@
-import pytest
+import logging
 import time
+from collections import defaultdict
+
+import pytest
 from symai import Symbol
+
 from src.hierarchical import HierarchicalSummary, Summary
 from src.hierarchical_OLD import HierarchicalSummary as HierarchicalSummaryOld
 from src.hierarchical_OLD import Summary as SummaryOld
-from src.hierarchical_OLD_BASIC import HierarchicalSummary as HierarchicalSummaryOldBasic
+from src.hierarchical_OLD_BASIC import \
+    HierarchicalSummary as HierarchicalSummaryOldBasic
 from src.hierarchical_OLD_BASIC import Summary as SummaryOldBasic
-import logging
-from collections import defaultdict
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)

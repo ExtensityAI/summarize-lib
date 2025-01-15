@@ -1,12 +1,14 @@
-from docx import Document
-import pytest
-import time
-from symai import Symbol
-from src.hierarchical import HierarchicalSummary
-from src.types import DocumentType
-from src.hierarchical_OLD import HierarchicalSummary as HierarchicalSummaryOld
-from src.hierarchical_OLD_BASIC import HierarchicalSummary as HierarchicalSummaryOldBasic
 import logging
+import time
+
+import pytest
+from symai import Symbol
+
+from src.hierarchical import HierarchicalSummary
+from src.hierarchical_OLD import HierarchicalSummary as HierarchicalSummaryOld
+from src.hierarchical_OLD_BASIC import \
+    HierarchicalSummary as HierarchicalSummaryOldBasic
+from src.types import DocumentType
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)

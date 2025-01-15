@@ -6,21 +6,35 @@ from textwrap import dedent
 from typing import List, Optional
 
 from loguru import logger
-from pydantic import BaseModel, field_validator
-from symai.components import FileReader, Function, ValidatedFunction
+from pydantic import BaseModel, Field, field_validator
+from sqlalchemy import desc
+from symai import Import
+from symai.components import FileReader, Function
 from symai.core_ext import bind
 
 from .types import TYPE_SPECIFIC_PROMPTS, DocumentType
 
+# Load the LLMDataModel class from the summarize-lib module
+LLMDataModel = Import.load_expression(
+    "ExtensityAI/primitives-extend", "LLMDataModel"
+)
 
-class Summary(BaseModel):
-    summary: str
-    facts: List[str]
+# Load the LLMDataModel class from the summarize-lib module
+ValidatedFunction = Import.load_expression(
+    "ExtensityAI/primitives-extend", "ValidatedFunction"
+)
+
+class Summary(LLMDataModel):
+    summary: str = Field(description="The summary of the document")
+    facts: List[str] = Field(description="Important facts extracted from the document")    
+    quotes: Optional[List[str]] = Field(default=None, description="Significant quotes extracted from the document verbatim")
     type: Optional[str] = None
-    quotes: Optional[List[str]] = None
+    
+    def validate():
+        # TODO: validate that quotes are verbatim from the document
+        pass
+        
 
-
-# TODO: move to symai
 class HierarchicalSummary(ValidatedFunction):
     # Define the prompt types as class variables
     def __init__(
@@ -28,6 +42,7 @@ class HierarchicalSummary(ValidatedFunction):
         file_link: str = None,
         content: str = None,
         document_name: str = None,
+        asset_name: str = None,
         min_num_chunks: int = 5,
         min_chunk_size: int = 250,
         max_output_tokens: int = 10000,
@@ -40,8 +55,11 @@ class HierarchicalSummary(ValidatedFunction):
         # only allow file_link or content
         assert (file_link and not content) or (content and not file_link)
 
+        if document_name is None and asset_name is not None:
+            document_name = asset_name
+            
         if content is not None:
-            assert document_name is not None
+            assert document_name is not None 
 
         super().__init__(data_model=Summary, retry_count=5, *args, **kwargs)
         self.file_link = file_link
@@ -132,15 +150,10 @@ class HierarchicalSummary(ValidatedFunction):
             - **IMPORTANT**: Ensure that the summary is consistent with the facts. Do not add information not contained in the document.
             {"- Extract significant quotes that support the main points and return them in a list in JSON format as 'quotes'" if self.include_quotes else ""}
             {"- The quotes should be chosen based on relevancy to the type-specific and user instructions, especially if a particular audience is specified" if self.include_quotes else ""}
-            
-            [Output Format]
-            JSON schema: {{"summary": "string", 
-            "facts": "array of strings" 
-            {', "quotes": "array of strings"' if self.include_quotes else ""}}}
         """
         )
+        prompt_text += Summary.instruct_llm()
 
-        logger.debug(prompt_text)
         return prompt_text
 
     @property
