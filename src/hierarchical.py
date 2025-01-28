@@ -7,7 +7,6 @@ from typing import List, Optional
 
 from loguru import logger
 from pydantic import BaseModel, Field, field_validator
-from sqlalchemy import desc
 from symai import Import
 from symai.components import FileReader, Function
 from symai.core_ext import bind
