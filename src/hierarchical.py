@@ -12,27 +12,56 @@ from symai.components import FileReader, Function
 from symai.core_ext import bind
 
 from .types import TYPE_SPECIFIC_PROMPTS, DocumentType
+import asyncio
+import functools
+import nest_asyncio
 
 # Load the LLMDataModel class from the summarize-lib module
-LLMDataModel = Import.load_expression(
-    "ExtensityAI/primitives-extend", "LLMDataModel"
-)
+LLMDataModel = Import.load_expression("ExtensityAI/primitives-extend", "LLMDataModel")
 
 # Load the LLMDataModel class from the summarize-lib module
 ValidatedFunction = Import.load_expression(
     "ExtensityAI/primitives-extend", "ValidatedFunction"
 )
 
+
 class Summary(LLMDataModel):
     summary: str = Field(description="The summary of the document")
-    facts: List[str] = Field(description="Important facts extracted from the document")    
-    quotes: Optional[List[str]] = Field(default=None, description="Significant quotes extracted from the document verbatim")
+    facts: List[str] = Field(description="Important facts extracted from the document")
+    quotes: Optional[List[str]] = Field(
+        default=None,
+        description="Significant quotes extracted from the document verbatim",
+    )
     type: Optional[str] = None
-    
+
     def validate():
         # TODO: validate that quotes are verbatim from the document
         pass
-        
+
+
+def always_get_an_event_loop() -> asyncio.AbstractEventLoop:
+    """
+    Ensure that there is always an event loop available.
+
+    This function tries to get the current event loop. If the current event loop is closed or does not exist,
+    it creates a new event loop and sets it as the current event loop.
+
+    Returns:
+        asyncio.AbstractEventLoop: The current or newly created event loop.
+    """
+    try:
+        # Try to get the current event loop
+        current_loop = asyncio.get_event_loop()
+        if current_loop.is_closed():
+            raise RuntimeError("Event loop is closed.")
+        return current_loop
+
+    except RuntimeError:
+        # If no event loop exists or it is closed, create a new one
+        new_loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(new_loop)
+        return new_loop
+
 
 class HierarchicalSummary(ValidatedFunction):
     # Define the prompt types as class variables
@@ -44,6 +73,7 @@ class HierarchicalSummary(ValidatedFunction):
         asset_name: str = None,
         min_num_chunks: int = 5,
         min_chunk_size: int = 250,
+        max_chunk_size: int = 1000,
         max_output_tokens: int = 10000,
         user_prompt: str = None,
         include_quotes: bool = False,
@@ -56,14 +86,15 @@ class HierarchicalSummary(ValidatedFunction):
 
         if document_name is None and asset_name is not None:
             document_name = asset_name
-            
+
         if content is not None:
-            assert document_name is not None 
+            assert document_name is not None
 
         super().__init__(data_model=Summary, retry_count=5, *args, **kwargs)
         self.file_link = file_link
         self.min_num_chunks = min_num_chunks
         self.min_chunk_size = min_chunk_size
+        self.max_chunk_size = max_chunk_size
         self.max_output_tokens = max_output_tokens
         self.user_prompt = user_prompt
         self.include_quotes = include_quotes
@@ -119,12 +150,12 @@ class HierarchicalSummary(ValidatedFunction):
         if self.user_prompt is not None:
             user_prompt = dedent(
                 f"""[Goal-specific Instructions]
-            This summary is intended for a specific audience or purpose.
-            Given the following details, ensure that the summary and the list of facts are tailored to the user's needs and contain all relevant information.
-                        
-            >>>
+            This summary is intended for a specific audience or purpose, which is defined in <purpose> below.
+            **In addition to the general summary and list of facts, ensure that if information relevant to the information below is present in the text, it is included in the summary{', facts and quotes ' if self.include_quotes else ' and facts'}.**
+                                    
+            <purpose>
             {self.user_prompt}
-            <<<"""
+            </purpose>"""
             )
 
         prompt_text = dedent(
@@ -147,8 +178,8 @@ class HierarchicalSummary(ValidatedFunction):
             - Summarize the content in a clear and concise manner, ensuring that all relevant points are captured.
             - Extract important facts from the text and return them in a list in JSON format as 'facts'.            
             - **IMPORTANT**: Ensure that the summary is consistent with the facts. Do not add information not contained in the document.
-            {"- Extract significant quotes that support the main points and return them in a list in JSON format as 'quotes'" if self.include_quotes else ""}
-            {"- The quotes should be chosen based on relevancy to the type-specific and user instructions, especially if a particular audience is specified" if self.include_quotes else ""}
+            {"- Extract significant quotes or anecdotes that support the main points and return them in a list in JSON format as 'quotes'" if self.include_quotes else ""}
+            {"- The quotes or anecdotes should be chosen based on relevancy to the type-specific and user instructions, especially if a particular audience is specified" if self.include_quotes else ""}
         """
         )
         prompt_text += Summary.instruct_llm()
@@ -252,43 +283,55 @@ class HierarchicalSummary(ValidatedFunction):
 
         return chunks
 
-    def summarize_chunks(self, chunks):
-        chunk_summaries = []
-        chunk_facts = []
-        chunk_quotes = []
-
-        for chunk in chunks:
-            res, usage = super().forward(
+    async def summarize_chunks(self, chunks):
+        async def summarize_chunk(chunk):
+            loop = asyncio.get_event_loop()
+            forward_fn = functools.partial(
+                super(HierarchicalSummary, self).forward,
                 chunk,
                 preview=False,
                 response_format={"type": "json_object"},
             )
+            return await loop.run_in_executor(None, forward_fn)
+
+        tasks = [summarize_chunk(chunk) for chunk in chunks]
+        results = await asyncio.gather(*tasks)
+
+        chunk_summaries = []
+        chunk_facts = []
+        chunk_quotes = []
+
+        for res, usage in results:
             chunk_summaries.append(res.summary)
             chunk_facts.extend(res.facts)
             if res.quotes:
                 chunk_quotes.extend(res.quotes)
 
-        res = Summary(
+        final_res = Summary(
             summary="\n".join(chunk_summaries),
             facts=chunk_facts,
             quotes=chunk_quotes,
         )
-        return res, self.compute_required_tokens(res.summary, count_context=False)
+        return final_res, self.compute_required_tokens(
+            final_res.summary, count_context=False
+        )
 
     def calculate_chunk_size(self, total_tokens):
         num_prompt_tokens = self.compute_required_tokens("", count_context=True)
         max_tokens_per_chunk = int(
             self._max_context_tokens() - num_prompt_tokens * 0.8
         )  # leave some headroom
-        chunk_size = total_tokens // self.min_num_chunks
+        chunk_size = total_tokens // self.min_num_chunks - num_prompt_tokens
 
-        if self.min_chunk_size < chunk_size:
+        if chunk_size > self.min_chunk_size:
             num_chunks = self.min_num_chunks
-            while chunk_size - num_prompt_tokens > max_tokens_per_chunk:
+            while (chunk_size > max_tokens_per_chunk) or (
+                chunk_size > self.max_chunk_size
+            ):
                 num_chunks += 1
                 chunk_size = total_tokens // num_chunks - num_prompt_tokens
 
-            return max(self.min_chunk_size, total_tokens // num_chunks)
+            return max(self.min_chunk_size, chunk_size)
         else:
             return self.min_chunk_size
 
@@ -382,7 +425,11 @@ class HierarchicalSummary(ValidatedFunction):
                     self.adapt("[[DOCUMENT TYPE]]\n" + doc_type.value)
                     self.adapt("[[DOCUMENT LANGUAGE]]\n" + doc_lang)
 
-                res, summary_token_count = self.summarize_chunks(chunks)
+                nest_asyncio.apply()
+                loop = always_get_an_event_loop()
+                res, summary_token_count = loop.run_until_complete(
+                    self.summarize_chunks(chunks)
+                )
                 data = res.summary
 
                 # store facts and quotes from first summarization pass, do not overwrite

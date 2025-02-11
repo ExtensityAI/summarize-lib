@@ -9,6 +9,34 @@ from symai.components import FileReader, Function, ValidatedFunction
 from symai.core_ext import bind
 import tempfile
 
+import asyncio
+import functools
+import nest_asyncio
+
+
+def always_get_an_event_loop() -> asyncio.AbstractEventLoop:
+    """
+    Ensure that there is always an event loop available.
+
+    This function tries to get the current event loop. If the current event loop is closed or does not exist,
+    it creates a new event loop and sets it as the current event loop.
+
+    Returns:
+        asyncio.AbstractEventLoop: The current or newly created event loop.
+    """
+    try:
+        # Try to get the current event loop
+        current_loop = asyncio.get_event_loop()
+        if current_loop.is_closed():
+            raise RuntimeError("Event loop is closed.")
+        return current_loop
+
+    except RuntimeError:
+        # If no event loop exists or it is closed, create a new one
+        new_loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(new_loop)
+        return new_loop
+
 
 class Summary(BaseModel):
     summary: str
@@ -71,8 +99,7 @@ class HierarchicalSummary(ValidatedFunction):
 
     def download_file(self, file_link: str):
         self.print_verbose(f"Downloading file from {file_link}")
-        
-        
+
         with urllib.request.urlopen(file_link) as f:
             with tempfile.NamedTemporaryFile(delete=False) as tmp_file:
                 tmp_file.write(f.read())
@@ -82,7 +109,6 @@ class HierarchicalSummary(ValidatedFunction):
         content, file_name = self.read_file(tmp_file_name)
         os.remove(tmp_file_name)
         return content, file_name
-
 
     @property
     def prompt(self):
@@ -103,7 +129,7 @@ class HierarchicalSummary(ValidatedFunction):
             + f"[[IMPORTANT]] Ensure that the summary is consistent with the facts. Do not add information not contained in the text.\n"
             + (
                 r'JSON schema: {"summary": "string", "facts": "array of strings"'
-                + (', "quotes": "array of strings"' if self.include_quotes else '')
+                + (', "quotes": "array of strings"' if self.include_quotes else "")
                 + "}"
             )
         )
@@ -203,28 +229,38 @@ class HierarchicalSummary(ValidatedFunction):
 
         return chunks
 
-    def summarize_chunks(self, chunks):
-        chunk_summaries = []
-        chunk_facts = []
-        chunk_quotes = []
-
-        for chunk in chunks:
-            res, usage = super().forward(
+    async def summarize_chunks(self, chunks):
+        async def summarize_chunk(chunk):
+            loop = asyncio.get_event_loop()
+            forward_fn = functools.partial(
+                super(HierarchicalSummary, self).forward,
                 chunk,
                 preview=False,
                 response_format={"type": "json_object"},
             )
+            return await loop.run_in_executor(None, forward_fn)
+
+        tasks = [summarize_chunk(chunk) for chunk in chunks]
+        results = await asyncio.gather(*tasks)
+
+        chunk_summaries = []
+        chunk_facts = []
+        chunk_quotes = []
+
+        for res, usage in results:
             chunk_summaries.append(res.summary)
             chunk_facts.extend(res.facts)
-            if hasattr(res, 'quotes') and res.quotes:
+            if res.quotes:
                 chunk_quotes.extend(res.quotes)
 
-        res = Summary(
+        final_res = Summary(
             summary="\n".join(chunk_summaries),
             facts=chunk_facts,
-            quotes=chunk_quotes if chunk_quotes else None,
+            quotes=chunk_quotes,
         )
-        return res, self.compute_required_tokens(res.summary, count_context=False)
+        return final_res, self.compute_required_tokens(
+            final_res.summary, count_context=False
+        )
 
     def calculate_chunk_size(self, total_tokens):
         num_prompt_tokens = self.compute_required_tokens("", count_context=True)
@@ -276,7 +312,7 @@ class HierarchicalSummary(ValidatedFunction):
             return res.type
         else:
             return "Unknown"
-    
+
     def get_asset_language(self, content):
         class ContentLanguage(BaseModel):
             language: str
@@ -324,7 +360,11 @@ class HierarchicalSummary(ValidatedFunction):
                     self.adapt("[[CONTENT TYPE]]\n" + asset_type)
                     self.adapt("[[CONTENT LANGUAGE]]\n" + asset_language)
 
-                res, summary_token_count = self.summarize_chunks(chunks)
+                nest_asyncio.apply()
+                loop = always_get_an_event_loop()
+                res, summary_token_count = loop.run_until_complete(
+                    self.summarize_chunks(chunks)
+                )
                 data = res.summary
 
                 # store facts from first summarization pass, do not overwrite
