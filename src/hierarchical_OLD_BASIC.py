@@ -10,8 +10,9 @@ from symai.core_ext import bind
 import tempfile
 
 import asyncio
-import functools
 import nest_asyncio
+import backoff
+import functools
 
 
 def always_get_an_event_loop() -> asyncio.AbstractEventLoop:
@@ -230,6 +231,18 @@ class HierarchicalSummary(ValidatedFunction):
         return chunks
 
     async def summarize_chunks(self, chunks):
+        @backoff.on_exception(
+            backoff.expo,
+            Exception,
+            max_tries=10,
+            factor=2,
+            on_backoff=lambda details: logger.warning(
+                f"Retrying summarization due to error: {details}"
+            ),
+            on_giveup=lambda details: logger.error(
+                f"Failed to summarize chunk after {details['tries']} attempts: {details}"
+            ),
+        )
         async def summarize_chunk(chunk):
             loop = asyncio.get_event_loop()
             forward_fn = functools.partial(

@@ -13,8 +13,9 @@ from symai.core_ext import bind
 
 from .types import TYPE_SPECIFIC_PROMPTS, DocumentType
 import asyncio
-import functools
 import nest_asyncio
+import backoff
+import functools
 
 # Load the LLMDataModel class from the summarize-lib module
 LLMDataModel = Import.load_expression("ExtensityAI/primitives-extend", "LLMDataModel")
@@ -183,7 +184,6 @@ class HierarchicalSummary(ValidatedFunction):
         """
         )
         prompt_text += Summary.instruct_llm()
-
         return prompt_text
 
     @property
@@ -284,6 +284,18 @@ class HierarchicalSummary(ValidatedFunction):
         return chunks
 
     async def summarize_chunks(self, chunks):
+        @backoff.on_exception(
+            backoff.expo,
+            Exception,
+            max_tries=10,
+            factor=2,
+            on_backoff=lambda details: logger.warning(
+                f"Retrying summarization due to error: {details}"
+            ),
+            on_giveup=lambda details: logger.error(
+                f"Failed to summarize chunk after {details['tries']} attempts: {details}"
+            ),
+        )
         async def summarize_chunk(chunk):
             loop = asyncio.get_event_loop()
             forward_fn = functools.partial(
