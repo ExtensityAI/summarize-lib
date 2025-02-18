@@ -27,11 +27,11 @@ ValidatedFunction = Import.load_expression(
 
 
 class Summary(LLMDataModel):
-    summary: str = Field(description="The summary of the document")
-    facts: List[str] = Field(description="Important facts extracted from the document")
+    summary: str = Field(description="An extremely comprehensive summary of the document. Do not start with 'This document is about...' or similar phrases.")
+    facts: List[str] = Field(description="Important facts and subjects extracted from the document.")
     quotes: Optional[List[str]] = Field(
         default=None,
-        description="Significant quotes extracted from the document verbatim",
+        description="Significant quotes extracted from the document **verbatim** if there are any.",
     )
     type: Optional[str] = None
 
@@ -39,6 +39,30 @@ class Summary(LLMDataModel):
         # TODO: validate that quotes are verbatim from the document
         pass
 
+def gather(chunks: List[LLMDataModel]):    
+    res_dict = {}
+    type_dict = {
+        list: {"default": list, "func": "append"},
+        str: {"default": str, "func": "concatenate"},
+        
+    }
+    for chunk in chunks:
+        chunk_fields = chunk.model_fields
+        for field_name, field_type in chunk_fields.items():
+            field = getattr(chunk, field_name)
+            if type(field) in type_dict and not field_type.exclude:                        
+                _type = type_dict[type(field)]
+                # setup field
+                if field_name not in res_dict:
+                    res_dict[field_name] = type(field)()
+                
+                # append or concatenate
+                if _type["func"] == "append":
+                    res_dict[field_name].extend(field)
+                elif _type["func"] == "concatenate":
+                    res_dict[field_name] += field + "\n"
+    
+    return res_dict
 
 def always_get_an_event_loop() -> asyncio.AbstractEventLoop:
     """
@@ -72,6 +96,7 @@ class HierarchicalSummary(ValidatedFunction):
         content: str = None,
         document_name: str = None,
         asset_name: str = None,
+        data_model: LLMDataModel = Summary,
         min_num_chunks: int = 5,
         min_chunk_size: int = 250,
         max_chunk_size: int = 1000,
@@ -91,7 +116,9 @@ class HierarchicalSummary(ValidatedFunction):
         if content is not None:
             assert document_name is not None
 
-        super().__init__(data_model=Summary, retry_count=5, *args, **kwargs)
+        assert issubclass(data_model, LLMDataModel)
+        
+        super().__init__(data_model=data_model, retry_count=5, *args, **kwargs)
         self.file_link = file_link
         self.min_num_chunks = min_num_chunks
         self.min_chunk_size = min_chunk_size
@@ -152,7 +179,7 @@ class HierarchicalSummary(ValidatedFunction):
             user_prompt = dedent(
                 f"""[Goal-specific Instructions]
             This summary is intended for a specific audience or purpose, which is defined in <purpose> below.
-            **In addition to the general summary and list of facts, ensure that if information relevant to the information below is present in the text, it is included in the summary{', facts and quotes ' if self.include_quotes else ' and facts'}.**
+            **In addition to the general summary and list of facts, ensure that if information relevant to the information below is present in the text, it is included in the summary and additional fields present in the JSON format.**
                                     
             <purpose>
             {self.user_prompt}
@@ -164,9 +191,11 @@ class HierarchicalSummary(ValidatedFunction):
             [[Document Processing Task]]
 
             [Main Objective]
-            Create a comprehensive summary of the provided content and return the result as JSON.
+            Create an extremely comprehensive summary of the provided content and return the result as JSON.
+            The document is split up into chunks, and each chunk is summarized separately. 
+            The final summary is the concatenation of all chunk summaries.
             The type of the provided content is specified in [[CONTENT TYPE]].
-            Information relevant to the type of content should be stored in the list of facts.   
+            In addition to the summary extract additional information as specified in the JSON format.
                      
             {type_specific_prompt}
                      
@@ -176,14 +205,14 @@ class HierarchicalSummary(ValidatedFunction):
             The summary must be in the language specified in [[CONTENT LANGUAGE]], regardless of the source material.
 
             [Key Requirements]
-            - Summarize the content in a clear and concise manner, ensuring that all relevant points are captured.
-            - Extract important facts from the text and return them in a list in JSON format as 'facts'.            
-            - **IMPORTANT**: Ensure that the summary is consistent with the facts. Do not add information not contained in the document.
-            {"- Extract significant quotes or anecdotes that support the main points and return them in a list in JSON format as 'quotes'" if self.include_quotes else ""}
-            {"- The quotes or anecdotes should be chosen based on relevancy to the type-specific and user instructions, especially if a particular audience is specified" if self.include_quotes else ""}
+            - Summarize the content, ensuring that all relevant points are captured.
+            - Do not start the summary with phrases like 'This document is about...' or similar.
+            - Make the summary as comprehensive as necessary to cover all key points.
+            - Extract all additional information as specified in the JSON format.
+            - **Important**: Ensure that the summary is consistent with the additional information extracted.
         """
         )
-        prompt_text += Summary.instruct_llm()
+        prompt_text += self.data_model.instruct_llm()
         return prompt_text
 
     @property
@@ -309,23 +338,10 @@ class HierarchicalSummary(ValidatedFunction):
         tasks = [summarize_chunk(chunk) for chunk in chunks]
         results = await asyncio.gather(*tasks)
 
-        chunk_summaries = []
-        chunk_facts = []
-        chunk_quotes = []
+        final_res = self.data_model(**gather([r[0] for r in results]))
 
-        for res, usage in results:
-            chunk_summaries.append(res.summary)
-            chunk_facts.extend(res.facts)
-            if res.quotes:
-                chunk_quotes.extend(res.quotes)
-
-        final_res = Summary(
-            summary="\n".join(chunk_summaries),
-            facts=chunk_facts,
-            quotes=chunk_quotes,
-        )
         return final_res, self.compute_required_tokens(
-            final_res.summary, count_context=False
+            final_res, count_context=False
         )
 
     def calculate_chunk_size(self, total_tokens):
@@ -425,12 +441,10 @@ class HierarchicalSummary(ValidatedFunction):
         if total_tokens > chunk_size:
             summary_token_count = self._max_context_tokens() + 1
             data = self.content
-            facts = None
-            quotes = None
             doc_type = None
 
             while summary_token_count > self.max_output_tokens:
-                chunks = self.chunk_by_token_count(data, chunk_size)
+                chunks = self.chunk_by_token_count(str(data), chunk_size)
                 if doc_type is None:
                     doc_type = self.get_document_type(chunks[0])
                     doc_lang = self.get_document_language(chunks[0])
@@ -442,20 +456,9 @@ class HierarchicalSummary(ValidatedFunction):
                 res, summary_token_count = loop.run_until_complete(
                     self.summarize_chunks(chunks)
                 )
-                data = res.summary
-
-                # store facts and quotes from first summarization pass, do not overwrite
-                if facts is None:
-                    facts = res.facts
-                    quotes = res.quotes
+                data = res
 
             # collect and return results
-            res = Summary(
-                summary=data,
-                facts=facts,
-                type=doc_type,
-                quotes=quotes,
-            )
             return res, self.get_usage()
         else:
             doc_type = self.get_document_type(self.content)
