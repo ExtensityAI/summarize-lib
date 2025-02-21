@@ -43,8 +43,7 @@ def gather(chunks: List[LLMDataModel]):
     res_dict = {}
     type_dict = {
         list: {"default": list, "func": "append"},
-        str: {"default": str, "func": "concatenate"},
-        
+        str: {"default": str, "func": "concatenate"},        
     }
     for chunk in chunks:
         chunk_fields = chunk.model_fields
@@ -458,6 +457,10 @@ class HierarchicalSummary(ValidatedFunction):
                 )
                 data = res
 
+            # overwrite type with initially detected type
+            if hasattr(res, "type"):
+                res.type = doc_type
+                
             # collect and return results
             return res, self.get_usage()
         else:
