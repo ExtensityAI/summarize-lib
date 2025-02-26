@@ -6,7 +6,7 @@ from textwrap import dedent
 from typing import List, Optional
 
 from loguru import logger
-from pydantic import BaseModel, Field, field_validator
+from pydantic import Field, field_validator
 from symai import Import
 from symai.components import FileReader, Function
 from symai.core_ext import bind
@@ -366,7 +366,7 @@ class HierarchicalSummary(ValidatedFunction):
         # Prepare a list of all values in the enum DocumentType
         allowed_types = [doc_type.value for doc_type in DocumentType]
 
-        class ContentType(BaseModel):
+        class ContentType(LLMDataModel):
             type: str
 
             @field_validator("type")
@@ -403,7 +403,7 @@ class HierarchicalSummary(ValidatedFunction):
         return self.document_type
 
     def get_document_language(self, content):
-        class ContentLanguage(BaseModel):
+        class ContentLanguage(LLMDataModel):
             language: str
 
         # construct function to determine document language, use ValidatedFunction to restrict to allowed types
