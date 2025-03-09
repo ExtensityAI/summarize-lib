@@ -1,3 +1,5 @@
+import asyncio
+import functools
 import os
 import re
 import tempfile
@@ -5,30 +7,25 @@ import urllib.request
 from textwrap import dedent
 from typing import List, Optional
 
+import backoff
+import nest_asyncio
 from loguru import logger
 from pydantic import Field, field_validator
-from symai import Import
 from symai.components import FileReader, Function
 from symai.core_ext import bind
+from symai.models import LLMDataModel
 
+from .functions import ValidatedFunction
 from .types import TYPE_SPECIFIC_PROMPTS, DocumentType
-import asyncio
-import nest_asyncio
-import backoff
-import functools
-
-# Load the LLMDataModel class from the summarize-lib module
-LLMDataModel = Import.load_expression("ExtensityAI/primitives-extend", "LLMDataModel")
-
-# Load the LLMDataModel class from the summarize-lib module
-ValidatedFunction = Import.load_expression(
-    "ExtensityAI/primitives-extend", "ValidatedFunction"
-)
 
 
 class Summary(LLMDataModel):
-    summary: str = Field(description="An extremely comprehensive summary of the document. Do not start with 'This document is about...' or similar phrases.")
-    facts: List[str] = Field(description="Important facts and subjects extracted from the document.")
+    summary: str = Field(
+        description="An extremely comprehensive summary of the document. Do not start with 'This document is about...' or similar phrases."
+    )
+    facts: List[str] = Field(
+        description="Important facts and subjects extracted from the document."
+    )
     quotes: Optional[List[str]] = Field(
         default=None,
         description="Significant quotes extracted from the document **verbatim** if there are any.",
@@ -39,29 +36,31 @@ class Summary(LLMDataModel):
         # TODO: validate that quotes are verbatim from the document
         pass
 
-def gather(chunks: List[LLMDataModel]):    
+
+def gather(chunks: List[LLMDataModel]):
     res_dict = {}
     type_dict = {
         list: {"default": list, "func": "append"},
-        str: {"default": str, "func": "concatenate"},        
+        str: {"default": str, "func": "concatenate"},
     }
     for chunk in chunks:
         chunk_fields = chunk.model_fields
         for field_name, field_type in chunk_fields.items():
             field = getattr(chunk, field_name)
-            if type(field) in type_dict and not field_type.exclude:                        
+            if type(field) in type_dict and not field_type.exclude:
                 _type = type_dict[type(field)]
                 # setup field
                 if field_name not in res_dict:
                     res_dict[field_name] = type(field)()
-                
+
                 # append or concatenate
                 if _type["func"] == "append":
                     res_dict[field_name].extend(field)
                 elif _type["func"] == "concatenate":
                     res_dict[field_name] += field + "\n"
-    
+
     return res_dict
+
 
 def always_get_an_event_loop() -> asyncio.AbstractEventLoop:
     """
@@ -116,7 +115,7 @@ class HierarchicalSummary(ValidatedFunction):
             assert document_name is not None
 
         assert issubclass(data_model, LLMDataModel)
-        
+
         super().__init__(data_model=data_model, retry_count=5, *args, **kwargs)
         self.file_link = file_link
         self.min_num_chunks = min_num_chunks
@@ -337,11 +336,9 @@ class HierarchicalSummary(ValidatedFunction):
         tasks = [summarize_chunk(chunk) for chunk in chunks]
         results = await asyncio.gather(*tasks)
 
-        final_res = self.data_model(**gather([r[0] for r in results]))
+        final_res = self.data_model(**gather(results))
 
-        return final_res, self.compute_required_tokens(
-            final_res, count_context=False
-        )
+        return final_res, self.compute_required_tokens(final_res, count_context=False)
 
     def calculate_chunk_size(self, total_tokens):
         num_prompt_tokens = self.compute_required_tokens("", count_context=True)
@@ -388,7 +385,7 @@ class HierarchicalSummary(ValidatedFunction):
             static_context=r"Return JSON: {'type': string}",
         )
 
-        res, usage = doc_type_func(
+        res = doc_type_func(
             content,
             preview=False,
             response_format={"type": "json_object"},
@@ -399,7 +396,6 @@ class HierarchicalSummary(ValidatedFunction):
 
         self.document_type = DocumentType(res.type)
 
-        self.add_usage(usage)
         return self.document_type
 
     def get_document_language(self, content):
@@ -418,19 +414,16 @@ class HierarchicalSummary(ValidatedFunction):
             static_context=r"Return JSON: {'language': string}",
         )
 
-        res, usage = doc_lang_func(
+        res = doc_lang_func(
             content,
             preview=False,
             response_format={"type": "json_object"},
             seed=self.seed,
         )
 
-        # add to overall usage
-        self.add_usage(usage)
         return res.language
 
     def forward(self) -> Summary:
-        self.reset_usage()
         self.clear()
 
         # compute required tokens
@@ -460,9 +453,9 @@ class HierarchicalSummary(ValidatedFunction):
             # overwrite type with initially detected type
             if hasattr(res, "type"):
                 res.type = doc_type
-                
+
             # collect and return results
-            return res, self.get_usage()
+            return res
         else:
             doc_type = self.get_document_type(self.content)
             doc_lang = self.get_document_language(self.content)
@@ -470,11 +463,11 @@ class HierarchicalSummary(ValidatedFunction):
             self.adapt("[[DOCUMENT TYPE]]\n" + doc_type.value)
             self.adapt("[[DOCUMENT LANGUAGE]]\n" + doc_lang)
 
-            res, usage = super().forward(
+            res = super().forward(
                 self.content,
                 preview=False,
                 response_format={"type": "json_object"},
             )
             res.type = doc_type
 
-        return res, usage
+        return res
