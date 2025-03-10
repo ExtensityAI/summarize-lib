@@ -7,7 +7,13 @@ import urllib.request
 from textwrap import dedent
 from typing import List, Optional
 
-import backoff
+from tenacity import (
+    before_sleep_log,
+    retry,
+    stop_after_attempt,
+    wait_exponential_jitter,
+    retry_if_exception_type,
+)
 import nest_asyncio
 from loguru import logger
 from pydantic import Field, field_validator
@@ -311,17 +317,11 @@ class HierarchicalSummary(ValidatedFunction):
         return chunks
 
     async def summarize_chunks(self, chunks):
-        @backoff.on_exception(
-            backoff.expo,
-            Exception,
-            max_tries=10,
-            factor=2,
-            on_backoff=lambda details: logger.warning(
-                f"Retrying summarization due to error: {details}"
-            ),
-            on_giveup=lambda details: logger.error(
-                f"Failed to summarize chunk after {details['tries']} attempts: {details}"
-            ),
+        @retry(
+            retry=retry_if_exception_type(Exception),
+            wait=wait_exponential_jitter(initial=0.25, max=60),
+            stop=stop_after_attempt(10),
+            before_sleep=before_sleep_log(logger, logger.level("DEBUG").no),
         )
         async def summarize_chunk(chunk):
             loop = asyncio.get_event_loop()
@@ -448,7 +448,7 @@ class HierarchicalSummary(ValidatedFunction):
                 logger.debug(f"Processing {len(chunks)} chunks...")
                 res, summary_token_count = loop.run_until_complete(
                     self.summarize_chunks(chunks)
-                )                
+                )
                 logger.debug(f"Processing of {len(chunks)} chunks completed")
                 data = res
 
