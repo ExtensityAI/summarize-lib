@@ -445,9 +445,11 @@ class HierarchicalSummary(ValidatedFunction):
 
                 nest_asyncio.apply()
                 loop = always_get_an_event_loop()
+                logger.debug(f"Processing {len(chunks)} chunks...")
                 res, summary_token_count = loop.run_until_complete(
                     self.summarize_chunks(chunks)
-                )
+                )                
+                logger.debug(f"Processing of {len(chunks)} chunks completed")
                 data = res
 
             # overwrite type with initially detected type
