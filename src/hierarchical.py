@@ -424,9 +424,11 @@ class HierarchicalSummary(ValidatedFunction):
         return res.language
 
     def forward(self) -> Summary:
+        logger.debug("Starting Hierarchical Summary...")
         self.clear()
 
         # compute required tokens
+        logger.debug("Computing required tokens...")
         total_tokens = self.compute_required_tokens(self.content, count_context=False)
         chunk_size = self.calculate_chunk_size(total_tokens)
 
@@ -435,15 +437,19 @@ class HierarchicalSummary(ValidatedFunction):
             data = self.content
             doc_type = None
 
-            while summary_token_count > self.max_output_tokens:
+            while summary_token_count > self.max_output_tokens:                
+                logger.debug("Chunking content...")
                 chunks = self.chunk_by_token_count(str(data), chunk_size)
                 if doc_type is None:
+                    logger.debug("Determining document type and language...")
                     doc_type = self.get_document_type(chunks[0])
                     doc_lang = self.get_document_language(chunks[0])
                     self.adapt("[[DOCUMENT TYPE]]\n" + doc_type.value)
                     self.adapt("[[DOCUMENT LANGUAGE]]\n" + doc_lang)
 
+                logger.debug("Patching asyncio...")
                 nest_asyncio.apply()
+                logger.debug("Preparing asyncio loop...")
                 loop = always_get_an_event_loop()
                 logger.debug(f"Processing {len(chunks)} chunks...")
                 res, summary_token_count = loop.run_until_complete(
@@ -459,12 +465,15 @@ class HierarchicalSummary(ValidatedFunction):
             # collect and return results
             return res
         else:
+            logger.debug("Content is within token limit, processing in one go...")
+            logger.debug("Determining document type and language...")
             doc_type = self.get_document_type(self.content)
             doc_lang = self.get_document_language(self.content)
 
             self.adapt("[[DOCUMENT TYPE]]\n" + doc_type.value)
             self.adapt("[[DOCUMENT LANGUAGE]]\n" + doc_lang)
 
+            logger.debug("Processing content...")
             res = super().forward(
                 self.content,
                 preview=False,
