@@ -7,6 +7,7 @@ import urllib.request
 from textwrap import dedent
 from typing import List, Optional
 
+from chonkie import BaseChunker, BaseEmbeddings
 from tenacity import (
     before_sleep_log,
     retry,
@@ -17,6 +18,10 @@ from tenacity import (
 import nest_asyncio
 from loguru import logger
 from pydantic import Field, field_validator
+import tiktoken
+from tiktoken import Encoding
+from tokenizers import Tokenizer
+from chonkie import RecursiveChunker
 from symai.components import FileReader, Function
 from symai.core_ext import bind
 from symai.models import LLMDataModel
@@ -107,6 +112,8 @@ class HierarchicalSummary(ValidatedFunction):
         max_output_tokens: int = 10000,
         user_prompt: str = None,
         include_quotes: bool = False,
+        tokenizer: str | BaseEmbeddings | Encoding = "gpt2",
+        chunker: BaseChunker = RecursiveChunker,
         seed: int = 42,
         *args,
         **kwargs,
@@ -145,6 +152,19 @@ class HierarchicalSummary(ValidatedFunction):
         self.content = f"[[DOCUMENT::{file_name}]]: <<<\n{str(file_content)}\n>>>\n"
         self.content_only = str(file_content)
 
+        # init tokenizer
+        if isinstance(tokenizer, str):
+            try:
+                self.tokenizer = tiktoken.encoding_for_model(tokenizer)
+            except:
+                try:
+                    self.tokenizer = Tokenizer.from_pretrained(tokenizer)
+                except:
+                    raise ValueError("Invalid tokenizer or model name")
+        else:
+            self.tokenizer = tokenizer
+        self.chunker = chunker
+        
         # Content type is unknown at initialization
         self.document_type = None
 
@@ -272,48 +292,9 @@ class HierarchicalSummary(ValidatedFunction):
 
     def chunk_by_token_count(self, text, chunk_size, include_context=False):
         # prepare results
-        chunks = []
-
-        # split text into words, punctuation, and spaces
-        words = self.split_words(text)
-
-        # chunking
-        num_words = len(words)
-        step_size = max(num_words // 2, 1)
-        min_step_size = 10
-
-        idx = 0
-        chunked_word_count = 0
-        cur_chunk = []
-
-        # combine chunks based on token length of full request
-        while chunked_word_count != len(words):
-            if idx + step_size < num_words:
-                candidate = words[idx : idx + step_size]
-            else:
-                candidate = words[idx:]
-            candidate_len = self.compute_required_tokens(
-                "".join(cur_chunk + candidate), count_context=include_context
-            )
-
-            if candidate_len > chunk_size:
-                step_size = step_size // 2
-                if step_size < min_step_size:
-                    chunks.append("".join(cur_chunk))
-                    chunked_word_count += len(cur_chunk)
-                    step_size = len(cur_chunk)
-                    cur_chunk = []
-            else:
-                cur_chunk += candidate
-                idx += len(candidate)
-                step_size = min(int(step_size * 1.05), num_words - idx)
-
-                if step_size == 0:
-                    chunks.append("".join(cur_chunk))
-                    chunked_word_count += len(cur_chunk)
-                    step_size = len(cur_chunk)
-                    cur_chunk = []
-
+        logger.debug(f"Chunking with chunk size: {chunk_size}")
+        chunks = self.chunker(self.tokenizer, chunk_size=chunk_size)(text)
+        logger.debug(f"Number of chunks: {len(chunks)}")
         return chunks
 
     async def summarize_chunks(self, chunks):
