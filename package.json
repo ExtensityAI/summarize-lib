@@ -12,5 +12,5 @@
             "type": "DocumentType"
         }
     ],
-    "dependencies": ["ExtensityAI/primitives-extend"]
+    "dependencies": []
 }
