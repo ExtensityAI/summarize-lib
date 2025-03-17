@@ -169,7 +169,7 @@ class HierarchicalSummary(ValidatedFunction):
         self.document_type = None
 
     def read_file(self, file_link: str):
-        self.print_verbose(f"Reading file from {file_link}")
+        logger.info(f"Reading file from {file_link}")
         reader = FileReader()
         content = reader(file_link)
         file_name = os.path.basename(file_link)
@@ -177,7 +177,7 @@ class HierarchicalSummary(ValidatedFunction):
         return val, file_name
 
     def download_file(self, file_link: str):
-        self.print_verbose(f"Downloading file from {file_link}")
+        logger.info(f"Downloading file from {file_link}")
 
         with urllib.request.urlopen(file_link) as f:
             with tempfile.NamedTemporaryFile(delete=False) as tmp_file:
