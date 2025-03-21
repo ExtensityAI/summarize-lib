@@ -164,7 +164,7 @@ class HierarchicalSummary(ValidatedFunction):
         else:
             self.tokenizer = tokenizer
         self.chunker = chunker
-        
+
         # Content type is unknown at initialization
         self.document_type = None
 
@@ -253,11 +253,11 @@ class HierarchicalSummary(ValidatedFunction):
     def _compute_required_tokens(self):
         pass
 
-    @bind(engine="neurosymbolic", property="api_max_context_tokens")(lambda: 0)
+    @bind(engine="neurosymbolic", property="max_context_tokens")
     def _max_context_tokens(_):
         pass
 
-    @bind(engine="neurosymbolic", property="api_max_response_tokens")(lambda: 0)
+    @bind(engine="neurosymbolic", property="max_response_tokens")
     def _max_response_tokens(_):
         pass
 
@@ -311,7 +311,7 @@ class HierarchicalSummary(ValidatedFunction):
                 chunk,
                 preview=False,
                 response_format={"type": "json_object"},
-                **kwargs
+                **kwargs,
             )
             return await loop.run_in_executor(None, forward_fn)
 
@@ -419,7 +419,7 @@ class HierarchicalSummary(ValidatedFunction):
             data = self.content
             doc_type = None
 
-            while summary_token_count > self.max_output_tokens:                
+            while summary_token_count > self.max_output_tokens:
                 logger.debug("Chunking content...")
                 chunks = self.chunk_by_token_count(str(data), chunk_size)
                 if doc_type is None:
@@ -444,8 +444,6 @@ class HierarchicalSummary(ValidatedFunction):
             if hasattr(res, "type"):
                 res.type = doc_type
 
-            # collect and return results
-            return res
         else:
             logger.debug("Content is within token limit, processing in one go...")
             logger.debug("Determining document type and language...")
@@ -463,4 +461,9 @@ class HierarchicalSummary(ValidatedFunction):
             )
             res.type = doc_type
 
+        # log compression ratio
+        result_tokens = self.compute_required_tokens(res, count_context=False)
+        logger.debug(
+            f"Compression ratio: {total_tokens} -> {result_tokens} ({ result_tokens/total_tokens:.2f})"
+        )
         return res
