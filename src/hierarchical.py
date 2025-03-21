@@ -297,7 +297,7 @@ class HierarchicalSummary(ValidatedFunction):
         logger.debug(f"Number of chunks: {len(chunks)}")
         return chunks
 
-    async def summarize_chunks(self, chunks):
+    async def summarize_chunks(self, chunks, **kwargs):
         @retry(
             retry=retry_if_exception_type(Exception),
             wait=wait_exponential_jitter(initial=0.25, max=60),
@@ -311,6 +311,7 @@ class HierarchicalSummary(ValidatedFunction):
                 chunk,
                 preview=False,
                 response_format={"type": "json_object"},
+                **kwargs
             )
             return await loop.run_in_executor(None, forward_fn)
 
@@ -404,7 +405,7 @@ class HierarchicalSummary(ValidatedFunction):
 
         return res.language
 
-    def forward(self) -> Summary:
+    def forward(self, **kwargs) -> Summary:
         logger.debug("Starting Hierarchical Summary...")
         self.clear()
 
@@ -434,7 +435,7 @@ class HierarchicalSummary(ValidatedFunction):
                 loop = always_get_an_event_loop()
                 logger.debug(f"Processing {len(chunks)} chunks...")
                 res, summary_token_count = loop.run_until_complete(
-                    self.summarize_chunks(chunks)
+                    self.summarize_chunks(chunks, **kwargs)
                 )
                 logger.debug(f"Processing of {len(chunks)} chunks completed")
                 data = res
