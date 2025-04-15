@@ -160,7 +160,10 @@ class HierarchicalSummary(ValidatedFunction):
                 try:
                     self.tokenizer = Tokenizer.from_pretrained(tokenizer)
                 except:
-                    raise ValueError("Invalid tokenizer or model name")
+                    logger.warning(
+                        f"Tokenizer {tokenizer} not found, using o200k_base tokenizer instead."
+                    )
+                    self.tokenizer = tiktoken.get_encoding('o200k_base')
         else:
             self.tokenizer = tokenizer
         self.chunker = chunker
