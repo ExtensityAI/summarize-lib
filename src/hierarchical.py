@@ -7,27 +7,28 @@ import urllib.request
 from textwrap import dedent
 from typing import List, Optional
 
-from chonkie import BaseChunker, BaseEmbeddings
-from tenacity import (
-    before_sleep_log,
-    retry,
-    stop_after_attempt,
-    wait_exponential_jitter,
-    retry_if_exception_type,
-)
 import nest_asyncio
 from loguru import logger
 from pydantic import Field, field_validator
-import tiktoken
-from tiktoken import Encoding
-from tokenizers import Tokenizer
-from chonkie import RecursiveChunker
+from symai import Import, Symbol
 from symai.components import FileReader, Function
 from symai.core_ext import bind
 from symai.models import LLMDataModel
+from tenacity import (
+    before_sleep_log,
+    retry,
+    retry_if_exception_type,
+    stop_after_attempt,
+    wait_exponential_jitter,
+)
+from tiktoken import Encoding
+from tokenizers import Tokenizer
 
 from .functions import ValidatedFunction
 from .types import TYPE_SPECIFIC_PROMPTS, DocumentType
+
+# Load the chunker
+ChonkieChunker = Import.load_expression("ExtensityAI/chonkie-symai", "ChonkieChunker")
 
 
 class Summary(LLMDataModel):
@@ -112,8 +113,8 @@ class HierarchicalSummary(ValidatedFunction):
         max_output_tokens: int = 10000,
         user_prompt: str = None,
         include_quotes: bool = False,
-        tokenizer: str | BaseEmbeddings | Encoding = "gpt2",
-        chunker: BaseChunker = RecursiveChunker,
+        tokenizer_name: str = "gpt2",
+        chunker_name: str = "RecursiveChunker",
         seed: int = 42,
         *args,
         **kwargs,
@@ -152,21 +153,9 @@ class HierarchicalSummary(ValidatedFunction):
         self.content = f"[[DOCUMENT::{file_name}]]: <<<\n{str(file_content)}\n>>>\n"
         self.content_only = str(file_content)
 
-        # init tokenizer
-        if isinstance(tokenizer, str):
-            try:
-                self.tokenizer = tiktoken.encoding_for_model(tokenizer)
-            except:
-                try:
-                    self.tokenizer = Tokenizer.from_pretrained(tokenizer)
-                except:
-                    logger.warning(
-                        f"Tokenizer {tokenizer} not found, using o200k_base tokenizer instead."
-                    )
-                    self.tokenizer = tiktoken.get_encoding('o200k_base')
-        else:
-            self.tokenizer = tokenizer
-        self.chunker = chunker
+        # init chunker
+        self.chunker = ChonkieChunker(tokenizer_name=tokenizer_name)
+        self.chunker_type = chunker_name
 
         # Content type is unknown at initialization
         self.document_type = None
@@ -296,7 +285,7 @@ class HierarchicalSummary(ValidatedFunction):
     def chunk_by_token_count(self, text, chunk_size, include_context=False):
         # prepare results
         logger.debug(f"Chunking with chunk size: {chunk_size}")
-        chunks = self.chunker(self.tokenizer, chunk_size=chunk_size)(text)
+        chunks = self.chunker(data=Symbol(text), chunker_name=self.chunker_type, chunk_size=chunk_size)
         logger.debug(f"Number of chunks: {len(chunks)}")
         return chunks
 

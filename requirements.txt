@@ -1,4 +1,3 @@
 pydantic
 nest_asyncio
 tenacity
-chonkie

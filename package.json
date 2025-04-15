@@ -12,5 +12,5 @@
             "type": "DocumentType"
         }
     ],
-    "dependencies": []
+    "dependencies": ["ExtensityAI/chonkie-symai"]
 }
