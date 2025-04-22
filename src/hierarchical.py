@@ -407,7 +407,7 @@ class HierarchicalSummary(ValidatedFunction):
         chunk_size = self.calculate_chunk_size(total_tokens)
 
         if total_tokens > chunk_size:
-            summary_token_count = self._max_context_tokens() + 1
+            summary_token_count = self.max_output_tokens + 1
             data = self.content
             doc_type = None
 
