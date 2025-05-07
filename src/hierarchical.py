@@ -421,9 +421,7 @@ class HierarchicalSummary(ValidatedFunction):
                     self.adapt("[[DOCUMENT TYPE]]\n" + doc_type.value)
                     self.adapt("[[DOCUMENT LANGUAGE]]\n" + doc_lang)
 
-                logger.debug("Patching asyncio...")
                 nest_asyncio.apply()
-                logger.debug("Preparing asyncio loop...")
                 loop = always_get_an_event_loop()
                 logger.debug(f"Processing {len(chunks)} chunks...")
                 res, summary_token_count = loop.run_until_complete(
