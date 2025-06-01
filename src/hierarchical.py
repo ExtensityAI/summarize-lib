@@ -105,6 +105,7 @@ class HierarchicalSummary(ValidatedFunction):
         file_link: str = None,
         content: str = None,
         document_name: str = None,
+        document_lang: str = None,
         asset_name: str = None,
         data_model: LLMDataModel = Summary,
         min_num_chunks: int = 5,
@@ -131,6 +132,7 @@ class HierarchicalSummary(ValidatedFunction):
         assert issubclass(data_model, LLMDataModel)
 
         super().__init__(data_model=data_model, retry_count=5, *args, **kwargs)
+        self.document_lang = document_lang
         self.file_link = file_link
         self.min_num_chunks = min_num_chunks
         self.min_chunk_size = min_chunk_size
@@ -196,7 +198,7 @@ class HierarchicalSummary(ValidatedFunction):
                 f"""[Goal-specific Instructions]
             This summary is intended for a specific audience or purpose, which is defined in <purpose> below.
             **In addition to the general summary and list of facts, ensure that if information relevant to the information below is present in the text, it is included in the summary and additional fields present in the JSON format.**
-                                    
+
             <purpose>
             {self.user_prompt}
             </purpose>"""
@@ -208,15 +210,15 @@ class HierarchicalSummary(ValidatedFunction):
 
             [Main Objective]
             Create an extremely comprehensive summary of the provided content and return the result as JSON.
-            The document is split up into chunks, and each chunk is summarized separately. 
+            The document is split up into chunks, and each chunk is summarized separately.
             The final summary is the concatenation of all chunk summaries.
             The type of the provided content is specified in [[CONTENT TYPE]].
             In addition to the summary extract additional information as specified in the JSON format.
-                     
+
             {type_specific_prompt}
-                     
+
             {user_prompt if self.user_prompt is not None else ""}
-                        
+
             [Language Requirements]
             The summary must be in the language specified in [[CONTENT LANGUAGE]], regardless of the source material.
 
@@ -376,13 +378,16 @@ class HierarchicalSummary(ValidatedFunction):
         class ContentLanguage(LLMDataModel):
             language: str
 
+        if self.document_lang is not None:
+            return self.document_lang
+
         # construct function to determine document language, use ValidatedFunction to restrict to allowed types
         doc_lang_func = ValidatedFunction(
             data_model=ContentLanguage,
             retry_count=self.retry_count,
             prompt=dedent(
                 """Which language is this document in?
-            - Follow the ISO 639 standard for language names, country and language codes. 
+            - Follow the ISO 639 standard for language names, country and language codes.
             - Use string format: '[[language_name]] ([[country]]) [[language_code]]'"""
             ),
             static_context=r"Return JSON: {'language': string}",
