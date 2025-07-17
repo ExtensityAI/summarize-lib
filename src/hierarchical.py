@@ -408,37 +408,37 @@ class HierarchicalSummary(ValidatedFunction):
 
         # compute required tokens
         logger.debug("Computing required tokens...")
-        total_tokens = self.compute_required_tokens(self.content, count_context=False)
-        chunk_size = self.calculate_chunk_size(total_tokens)
+        total_tokens = self.compute_required_tokens_graceful(self.content, count_context=False)
+        if total_tokens is not None:
+            chunk_size = self.calculate_chunk_size(total_tokens)
 
-        if total_tokens > chunk_size:
-            summary_token_count = self.max_output_tokens + 1
-            data = self.content
-            doc_type = None
+            if total_tokens > chunk_size:
+                summary_token_count = self.max_output_tokens + 1
+                data = self.content
+                doc_type = None
 
-            while summary_token_count > self.max_output_tokens:
-                logger.debug("Chunking content...")
-                chunks = self.chunk_by_token_count(str(data), chunk_size)
-                if doc_type is None:
-                    logger.debug("Determining document type and language...")
-                    doc_type = self.get_document_type(chunks[0])
-                    doc_lang = self.get_document_language(chunks[0])
-                    self.adapt("[[DOCUMENT TYPE]]\n" + doc_type.value)
-                    self.adapt("[[DOCUMENT LANGUAGE]]\n" + doc_lang)
+                while summary_token_count > self.max_output_tokens:
+                    logger.debug("Chunking content...")
+                    chunks = self.chunk_by_token_count(str(data), chunk_size)
+                    if doc_type is None:
+                        logger.debug("Determining document type and language...")
+                        doc_type = self.get_document_type(chunks[0])
+                        doc_lang = self.get_document_language(chunks[0])
+                        self.adapt("[[DOCUMENT TYPE]]\n" + doc_type.value)
+                        self.adapt("[[DOCUMENT LANGUAGE]]\n" + doc_lang)
 
-                nest_asyncio.apply()
-                loop = always_get_an_event_loop()
-                logger.debug(f"Processing {len(chunks)} chunks...")
-                res, summary_token_count = loop.run_until_complete(
-                    self.summarize_chunks(chunks, **kwargs)
-                )
-                logger.debug(f"Processing of {len(chunks)} chunks completed")
-                data = res
+                    nest_asyncio.apply()
+                    loop = always_get_an_event_loop()
+                    logger.debug(f"Processing {len(chunks)} chunks...")
+                    res, summary_token_count = loop.run_until_complete(
+                        self.summarize_chunks(chunks, **kwargs)
+                    )
+                    logger.debug(f"Processing of {len(chunks)} chunks completed")
+                    data = res
 
-            # overwrite type with initially detected type
-            if hasattr(res, "type"):
-                res.type = doc_type
-
+                # overwrite type with initially detected type
+                if hasattr(res, "type"):
+                    res.type = doc_type
         else:
             logger.debug("Content is within token limit, processing in one go...")
             logger.debug("Determining document type and language...")
@@ -457,8 +457,16 @@ class HierarchicalSummary(ValidatedFunction):
             res.type = doc_type
 
         # log compression ratio
-        result_tokens = self.compute_required_tokens(res, count_context=False)
-        logger.debug(
-            f"Compression ratio: {total_tokens} -> {result_tokens} ({ result_tokens/total_tokens:.2f})"
-        )
+        result_tokens = self.compute_required_tokens_graceful(res, count_context=False)
+        if result_tokens is not None:
+            logger.debug(
+                f"Compression ratio: {total_tokens} -> {result_tokens} ({ result_tokens/total_tokens:.2f})"
+            )
+
         return res
+
+    def compute_required_tokens_graceful(self, data, count_context=True):
+        try:
+            return self.compute_required_tokens(data, count_context=count_context)
+        except NotImplementedError:
+            return # Gracefully handle NotImplementedError; any other exception will be raised
