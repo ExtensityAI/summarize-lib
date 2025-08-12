@@ -277,7 +277,7 @@ class HierarchicalSummary(ValidatedFunction):
             response_format={"type": "json_object"},
             seed=self.seed,
         )
-
+        
         # count prompt tokens
         return self._compute_required_tokens(preview.prop.prepared_input)
 
@@ -409,36 +409,39 @@ class HierarchicalSummary(ValidatedFunction):
         # compute required tokens
         logger.debug("Computing required tokens...")
         total_tokens = self.compute_required_tokens_graceful(self.content, count_context=False)
-        if total_tokens is not None:
-            chunk_size = self.calculate_chunk_size(total_tokens)
+        if total_tokens is None:
+            logger.warning("Total tokens could not be determined.")
+            total_tokens = 1
 
-            if total_tokens > chunk_size:
-                summary_token_count = self.max_output_tokens + 1
-                data = self.content
-                doc_type = None
+        chunk_size = self.calculate_chunk_size(total_tokens)
 
-                while summary_token_count > self.max_output_tokens:
-                    logger.debug("Chunking content...")
-                    chunks = self.chunk_by_token_count(str(data), chunk_size)
-                    if doc_type is None:
-                        logger.debug("Determining document type and language...")
-                        doc_type = self.get_document_type(chunks[0])
-                        doc_lang = self.get_document_language(chunks[0])
-                        self.adapt("[[DOCUMENT TYPE]]\n" + doc_type.value)
-                        self.adapt("[[DOCUMENT LANGUAGE]]\n" + doc_lang)
+        if total_tokens > chunk_size:
+            summary_token_count = self.max_output_tokens + 1
+            data = self.content
+            doc_type = None
 
-                    nest_asyncio.apply()
-                    loop = always_get_an_event_loop()
-                    logger.debug(f"Processing {len(chunks)} chunks...")
-                    res, summary_token_count = loop.run_until_complete(
-                        self.summarize_chunks(chunks, **kwargs)
-                    )
-                    logger.debug(f"Processing of {len(chunks)} chunks completed")
-                    data = res
+            while summary_token_count > self.max_output_tokens:
+                logger.debug("Chunking content...")
+                chunks = self.chunk_by_token_count(str(data), chunk_size)
+                if doc_type is None:
+                    logger.debug("Determining document type and language...")
+                    doc_type = self.get_document_type(chunks[0])
+                    doc_lang = self.get_document_language(chunks[0])
+                    self.adapt("[[DOCUMENT TYPE]]\n" + doc_type.value)
+                    self.adapt("[[DOCUMENT LANGUAGE]]\n" + doc_lang)
 
-                # overwrite type with initially detected type
-                if hasattr(res, "type"):
-                    res.type = doc_type
+                nest_asyncio.apply()
+                loop = always_get_an_event_loop()
+                logger.debug(f"Processing {len(chunks)} chunks...")
+                res, summary_token_count = loop.run_until_complete(
+                    self.summarize_chunks(chunks, **kwargs)
+                )
+                logger.debug(f"Processing of {len(chunks)} chunks completed")
+                data = res
+
+            # overwrite type with initially detected type
+            if hasattr(res, "type"):
+                res.type = doc_type
         else:
             logger.debug("Content is within token limit, processing in one go...")
             logger.debug("Determining document type and language...")
@@ -454,7 +457,8 @@ class HierarchicalSummary(ValidatedFunction):
                 preview=False,
                 response_format={"type": "json_object"},
             )
-            res.type = doc_type
+            if hasattr(res, "type"):
+                res.type = doc_type
 
         # log compression ratio
         result_tokens = self.compute_required_tokens_graceful(res, count_context=False)
@@ -469,4 +473,7 @@ class HierarchicalSummary(ValidatedFunction):
         try:
             return self.compute_required_tokens(data, count_context=count_context)
         except NotImplementedError:
+            logger.debug(
+                "compute_required_tokens is not implemented for this engine, returning None"
+            )
             return # Gracefully handle NotImplementedError; any other exception will be raised
