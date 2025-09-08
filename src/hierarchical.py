@@ -117,6 +117,7 @@ class HierarchicalSummary(ValidatedFunction):
         tokenizer_name: str = "gpt2",
         chunker_name: str = "RecursiveChunker",
         seed: int = 42,
+        enable_initial_compression: bool = True,
         *args,
         **kwargs,
     ):
@@ -141,9 +142,10 @@ class HierarchicalSummary(ValidatedFunction):
         self.user_prompt = user_prompt
         self.include_quotes = include_quotes
         self.seed = seed
+        self.tokenizer_name = tokenizer_name
+        self.enable_initial_compression = enable_initial_compression
 
-        file_content = None
-        file_name = None
+        # Prepare content and file metadata
         if file_link is not None:
             if file_link.startswith("http"):
                 file_content, file_name = self.download_file(file_link)
@@ -152,11 +154,12 @@ class HierarchicalSummary(ValidatedFunction):
         else:
             file_name = document_name
             file_content = str(content)
+
         self.content = f"[[DOCUMENT::{file_name}]]: <<<\n{str(file_content)}\n>>>\n"
         self.content_only = str(file_content)
 
         # init chunker
-        self.chunker = ChonkieChunker(tokenizer_name=tokenizer_name)
+        self.chunker = ChonkieChunker(tokenizer_name=self.tokenizer_name)
         self.chunker_type = chunker_name
 
         # Content type is unknown at initialization
@@ -308,13 +311,28 @@ class HierarchicalSummary(ValidatedFunction):
                 **kwargs,
             )
             return await loop.run_in_executor(None, forward_fn)
+        """Summarize all chunks concurrently.
 
+        Returns:
+            (LLMDataModel, int): aggregated result instance and original number of chunks.
+        """
         tasks = [summarize_chunk(chunk) for chunk in chunks]
         results = await asyncio.gather(*tasks)
 
-        final_res = self.data_model(**gather(results))
+        # Aggregate raw results (concatenate strings / extend lists)
+        aggregated = gather(results)
+        final_res = self.data_model(**aggregated)
 
-        return final_res, self.compute_required_tokens(final_res, count_context=False)
+        return final_res, len(results)
+
+    # -------------------------------------------------
+    # Internal input augmentation
+    # -------------------------------------------------
+    def _augment_with_user_prompt(self, text: str) -> str:
+        """Attach user/purpose prompt to model input body so that the ValidatedFunction sees it in data as well as in prompt."""
+        if self.user_prompt:
+            return f"{text}\n[[PURPOSE]]\n{self.user_prompt}\n"
+        return text
 
     def calculate_chunk_size(self, total_tokens):
         num_prompt_tokens = self.compute_required_tokens("", count_context=True)
@@ -415,50 +433,89 @@ class HierarchicalSummary(ValidatedFunction):
 
         chunk_size = self.calculate_chunk_size(total_tokens)
 
-        if total_tokens > chunk_size:
-            summary_token_count = self.max_output_tokens + 1
-            data = self.content
-            doc_type = None
+        # Always perform a chunked first pass (even if it results in a single chunk)
+        data = self.content
+        doc_type = None
 
-            while summary_token_count > self.max_output_tokens:
-                logger.debug("Chunking content...")
-                chunks = self.chunk_by_token_count(str(data), chunk_size)
-                if doc_type is None:
-                    logger.debug("Determining document type and language...")
-                    doc_type = self.get_document_type(chunks[0])
-                    doc_lang = self.get_document_language(chunks[0])
-                    self.adapt("[[DOCUMENT TYPE]]\n" + doc_type.value)
-                    self.adapt("[[DOCUMENT LANGUAGE]]\n" + doc_lang)
-
-                nest_asyncio.apply()
-                loop = always_get_an_event_loop()
-                logger.debug(f"Processing {len(chunks)} chunks...")
-                res, summary_token_count = loop.run_until_complete(
-                    self.summarize_chunks(chunks, **kwargs)
-                )
-                logger.debug(f"Processing of {len(chunks)} chunks completed")
-                data = res
-
-            # overwrite type with initially detected type
-            if hasattr(res, "type"):
-                res.type = doc_type
-        else:
-            logger.debug("Content is within token limit, processing in one go...")
-            logger.debug("Determining document type and language...")
-            doc_type = self.get_document_type(self.content)
-            doc_lang = self.get_document_language(self.content)
-
+        logger.debug("Chunking content (initial pass, unified)...")
+        chunks = self.chunk_by_token_count(str(self._augment_with_user_prompt(data)), chunk_size)
+        if doc_type is None:
+            logger.debug("Determining document type and language from first chunk...")
+            doc_type = self.get_document_type(chunks[0])
+            doc_lang = self.get_document_language(chunks[0])
             self.adapt("[[DOCUMENT TYPE]]\n" + doc_type.value)
             self.adapt("[[DOCUMENT LANGUAGE]]\n" + doc_lang)
 
-            logger.debug("Processing content...")
-            res = super().forward(
-                self.content,
-                preview=False,
-                response_format={"type": "json_object"},
+        nest_asyncio.apply()
+        loop = always_get_an_event_loop()
+        logger.debug(f"Processing {len(chunks)} chunks (initial summarization)...")
+        res, _orig_chunk_count = loop.run_until_complete(
+            self.summarize_chunks(chunks, **kwargs)
+        )
+        logger.debug("Initial chunk processing completed")
+
+        # --- Deduplicate list fields once ---
+        res = self._deduplicate_list_fields(res)
+
+        # --- Compression loop: only compress string fields ---
+        def _string_field_names():
+            for fname, finfo in res.model_fields.items():
+                if getattr(finfo, "exclude", False):
+                    continue
+                val = getattr(res, fname)
+                if isinstance(val, str):
+                    yield fname
+
+        summary_token_count = self.compute_required_tokens_graceful(res, count_context=False) or 0
+        logger.debug(f"Initial aggregated token count: {summary_token_count}")
+
+        compression_attempt = 0
+
+        def _compress_pass(attempt: int):
+            logger.debug(
+                f"Compression attempt {attempt}: starting (current tokens={summary_token_count}, limit={self.max_output_tokens})"
             )
-            if hasattr(res, "type"):
-                res.type = doc_type
+            improved = False
+            for fname in _string_field_names():
+                current_val = getattr(res, fname)
+                if not current_val or not isinstance(current_val, str):
+                    continue
+                compressed = self._compress_string_field_recursive(
+                    current_val, field_name=fname, attempt=attempt
+                )
+                if compressed and compressed != current_val:
+                    setattr(res, fname, compressed)
+                    improved = True
+            return improved
+
+        # Optional initial compression pass (can be disabled to avoid recursive inflation)
+        if self.enable_initial_compression:
+            compression_attempt += 1
+            _compress_pass(compression_attempt)
+            summary_token_count = self.compute_required_tokens_graceful(res, count_context=False) or 0
+            logger.debug(
+                f"Post-attempt {compression_attempt} token count: {summary_token_count} (initial pass)"
+            )
+
+        # Additional passes only if still above limit
+        while summary_token_count > self.max_output_tokens and compression_attempt < 6:
+            compression_attempt += 1
+            _compress_pass(compression_attempt)
+            summary_token_count = self.compute_required_tokens_graceful(
+                res, count_context=False
+            ) or 0
+            logger.debug(
+                f"Post-attempt {compression_attempt} token count: {summary_token_count}"
+            )
+
+        if summary_token_count > self.max_output_tokens:
+            logger.warning(
+                "Exceeded max_output_tokens after compression attempts; returning best-effort result."
+            )
+
+        # overwrite type with initially detected type
+        if hasattr(res, "type"):
+            res.type = doc_type
 
         # log compression ratio
         result_tokens = self.compute_required_tokens_graceful(res, count_context=False)
@@ -477,3 +534,91 @@ class HierarchicalSummary(ValidatedFunction):
                 "compute_required_tokens is not implemented for this engine, returning None"
             )
             return # Gracefully handle NotImplementedError; any other exception will be raised
+
+    # -------------------------------------------------
+    # Helpers: list deduplication & string compression
+    # -------------------------------------------------
+    def _deduplicate_list(self, items: List[str]) -> List[str]:
+        seen = set()
+        result = []
+        for it in items or []:
+            if not isinstance(it, str):
+                continue
+            norm = re.sub(r"\s+", " ", it.strip().lower())
+            if norm and norm not in seen:
+                seen.add(norm)
+                result.append(it.strip())
+        # prune substrings (keep longer entries) to reduce redundancy
+        pruned = []
+        for i, x in enumerate(result):
+            xl = x.lower()
+            longer_exists = any(
+                i != j and len(result[j]) > len(x) and xl in result[j].lower()
+                for j in range(len(result))
+            )
+            if longer_exists:
+                continue
+            pruned.append(x)
+        return pruned
+
+    def _deduplicate_list_fields(self, res: LLMDataModel) -> LLMDataModel:
+        """Deduplicate all list fields of a model instance in-place and return it."""
+        for fname, finfo in res.model_fields.items():
+            if getattr(finfo, "exclude", False):
+                continue
+            val = getattr(res, fname, None)
+            if isinstance(val, list):
+                deduped = self._deduplicate_list(val)
+                if len(deduped) != len(val):
+                    logger.debug(
+                        f"Deduplicated list field '{fname}' from {len(val)} -> {len(deduped)} items"
+                    )
+                setattr(res, fname, deduped)
+        return res
+
+    def _compress_string_field_recursive(self, text: str, field_name: str, attempt: int) -> str:
+        """Recursively invoke HierarchicalSummary on a single string field and return (potentially) shorter result.
+
+        Only replaces the field if the recursive result is not longer than the original.
+        """
+        logger.debug(f"Attempting recursive compression for field '{field_name}' (len={len(text)}, attempt {attempt})")
+        if not text or len(text) < 1024:  # Skip tiny strings to save cost
+            return text
+        try:
+            # Create a nested summarizer instance using the same data model
+            inner = HierarchicalSummary(
+                content=text,
+                document_name=f"{field_name}_compress_attempt_{attempt}.txt",
+                data_model=self.data_model,
+                min_num_chunks=self.min_num_chunks,
+                min_chunk_size=self.min_chunk_size,
+                max_chunk_size=self.max_chunk_size,
+                max_output_tokens=max(int(self.max_output_tokens * 0.6), 1024),
+                user_prompt=self.user_prompt,
+                include_quotes=self.include_quotes,
+                tokenizer_name=self.tokenizer_name,
+                chunker_name=self.chunker_type,
+                seed=self.seed if self.seed else 42 + attempt,
+                enable_initial_compression=False,  # prevent nested mandatory pass
+            )
+            # Reuse already detected type / language to avoid re-detection cost
+            if self.document_type:
+                inner.document_type = self.document_type
+                inner.adapt("[[DOCUMENT TYPE]]\n" + self.document_type.value)
+            if self.document_lang:
+                inner.adapt("[[DOCUMENT LANGUAGE]]\n" + self.document_lang)
+
+            nested_res = inner.forward()
+            # Extract same-named field
+            if hasattr(nested_res, field_name):
+                new_val = getattr(nested_res, field_name)
+                if isinstance(new_val, str) and len(new_val) <= len(text):
+                    logger.debug(
+                        f"Recursive compression '{field_name}' attempt {attempt}: {len(text)} -> {len(new_val)} chars"
+                    )
+                    return new_val
+        except Exception as e:
+            logger.warning(
+                f"Recursive compression failed for field '{field_name}' attempt {attempt}: {e}"
+            )
+        return text
