@@ -497,16 +497,16 @@ class HierarchicalSummary(ValidatedFunction):
                 f"Post-attempt {compression_attempt} token count: {summary_token_count} (initial pass)"
             )
 
-        # Additional passes only if still above limit
-        while summary_token_count > self.max_output_tokens and compression_attempt < 6:
-            compression_attempt += 1
-            _compress_pass(compression_attempt)
-            summary_token_count = self.compute_required_tokens_graceful(
-                res, count_context=False
-            ) or 0
-            logger.debug(
-                f"Post-attempt {compression_attempt} token count: {summary_token_count}"
-            )
+            # Additional passes only if still above limit
+            while summary_token_count > self.max_output_tokens and compression_attempt < 5:
+                compression_attempt += 1
+                _compress_pass(compression_attempt)
+                summary_token_count = self.compute_required_tokens_graceful(
+                    res, count_context=False
+                ) or 0
+                logger.debug(
+                    f"Post-attempt {compression_attempt} token count: {summary_token_count}"
+                )
 
         if summary_token_count > self.max_output_tokens:
             logger.warning(
@@ -591,9 +591,9 @@ class HierarchicalSummary(ValidatedFunction):
                 document_name=f"{field_name}_compress_attempt_{attempt}.txt",
                 data_model=self.data_model,
                 min_num_chunks=self.min_num_chunks,
-                min_chunk_size=self.min_chunk_size,
-                max_chunk_size=self.max_chunk_size,
-                max_output_tokens=max(int(self.max_output_tokens * 0.6), 1024),
+                min_chunk_size=int(self.min_chunk_size * (1 if attempt == 1 else 1 + (attempt - 1) * 0.2)),
+                max_chunk_size=int(self.max_chunk_size * (1 if attempt == 1 else 1 + (attempt - 1) * 0.2)),
+                max_output_tokens=self.max_output_tokens,
                 user_prompt=self.user_prompt,
                 include_quotes=self.include_quotes,
                 tokenizer_name=self.tokenizer_name,
