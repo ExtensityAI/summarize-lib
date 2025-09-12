@@ -11,7 +11,7 @@ import nest_asyncio
 from loguru import logger
 from pydantic import Field, field_validator
 from symai import Import, Symbol
-from symai.components import FileReader, Function
+from symai.components import FileReader, Function, DynamicEngine
 from symai.core_ext import bind
 from symai.models import LLMDataModel
 from tenacity import (
@@ -29,6 +29,7 @@ from .types import TYPE_SPECIFIC_PROMPTS, DocumentType
 
 # Load the chunker
 ChonkieChunker = Import.load_expression("ExtensityAI/chonkie-symai", "ChonkieChunker")
+
 
 
 class Summary(LLMDataModel):
@@ -118,6 +119,7 @@ class HierarchicalSummary(ValidatedFunction):
         chunker_name: str = "RecursiveChunker",
         seed: int = 42,
         enable_initial_compression: bool = True,
+        engine: Optional[object] = None,
         *args,
         **kwargs,
     ):
@@ -144,6 +146,7 @@ class HierarchicalSummary(ValidatedFunction):
         self.seed = seed
         self.tokenizer_name = tokenizer_name
         self.enable_initial_compression = enable_initial_compression
+        self.engine = engine  # Store the engine instance
 
         # Prepare content and file metadata
         if file_link is not None:
@@ -280,7 +283,7 @@ class HierarchicalSummary(ValidatedFunction):
             response_format={"type": "json_object"},
             seed=self.seed,
         )
-        
+
         # count prompt tokens
         return self._compute_required_tokens(preview.prop.prepared_input)
 
@@ -379,12 +382,22 @@ class HierarchicalSummary(ValidatedFunction):
             static_context=r"Return JSON: {'type': string}",
         )
 
-        res = doc_type_func(
-            content,
-            preview=False,
-            response_format={"type": "json_object"},
-            seed=self.seed,
-        )
+        # Use DynamicEngine context if engine is provided
+        if self.engine is not None:
+            with DynamicEngine(model=self.engine.model, api_key=self.engine.api_key):
+                res = doc_type_func(
+                    content,
+                    preview=False,
+                    response_format={"type": "json_object"},
+                    seed=self.seed,
+                )
+        else:
+            res = doc_type_func(
+                content,
+                preview=False,
+                response_format={"type": "json_object"},
+                seed=self.seed,
+            )
 
         # Store the content type for use in prompt
 
@@ -411,12 +424,22 @@ class HierarchicalSummary(ValidatedFunction):
             static_context=r"Return JSON: {'language': string}",
         )
 
-        res = doc_lang_func(
-            content,
-            preview=False,
-            response_format={"type": "json_object"},
-            seed=self.seed,
-        )
+        # Use DynamicEngine context if engine is provided
+        if self.engine is not None:
+            with DynamicEngine(model=self.engine.model, api_key=self.engine.api_key):
+                res = doc_lang_func(
+                    content,
+                    preview=False,
+                    response_format={"type": "json_object"},
+                    seed=self.seed,
+                )
+        else:
+            res = doc_lang_func(
+                content,
+                preview=False,
+                response_format={"type": "json_object"},
+                seed=self.seed,
+            )
 
         return res.language
 
@@ -424,6 +447,14 @@ class HierarchicalSummary(ValidatedFunction):
         logger.debug("Starting Hierarchical Summary...")
         self.clear()
 
+        # If an engine is provided, wrap all processing with DynamicEngine context
+        if self.engine is not None:
+            with DynamicEngine(model=self.engine.model, api_key=self.engine.api_key):
+                return self._forward_with_engine(**kwargs)
+        else:
+            return self._forward_with_engine(**kwargs)
+
+    def _forward_with_engine(self, **kwargs) -> Summary:
         # compute required tokens
         logger.debug("Computing required tokens...")
         total_tokens = self.compute_required_tokens_graceful(self.content, count_context=False)
@@ -600,6 +631,7 @@ class HierarchicalSummary(ValidatedFunction):
                 chunker_name=self.chunker_type,
                 seed=self.seed if self.seed else 42 + attempt,
                 enable_initial_compression=False,  # prevent nested mandatory pass
+                engine=self.engine,  # Pass the engine to nested instances
             )
             # Reuse already detected type / language to avoid re-detection cost
             if self.document_type:
