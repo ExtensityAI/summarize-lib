@@ -305,9 +305,7 @@ class HierarchicalSummary(ValidatedFunction):
 
     def chunk_by_token_count(self, text, chunk_size, include_context=False):
         # prepare results
-        logger.debug(f"Chunking with chunk size: {chunk_size}")
         chunks = self.chunker(data=Symbol(text), chunker_name=self.chunker_type, chunk_size=chunk_size)
-        logger.debug(f"Number of chunks: {len(chunks)}")
         return chunks
 
     async def summarize_chunks(self, chunks, **kwargs):
@@ -470,7 +468,6 @@ class HierarchicalSummary(ValidatedFunction):
         return res.language
 
     def forward(self, **kwargs) -> Summary:
-        logger.debug("Starting Hierarchical Summary...")
         self.clear()
 
         # If an engine is provided, wrap all processing with DynamicEngine context
@@ -482,7 +479,6 @@ class HierarchicalSummary(ValidatedFunction):
 
     def _forward_with_engine(self, **kwargs) -> Summary:
         # compute required tokens
-        logger.debug("Computing required tokens...")
         total_tokens = self.compute_required_tokens_graceful(self.content, count_context=False)
         if total_tokens is None:
             logger.warning("Total tokens could not be determined.")
@@ -494,10 +490,8 @@ class HierarchicalSummary(ValidatedFunction):
         data = self.content
         doc_type = None
 
-        logger.debug("Chunking content (initial pass, unified)...")
         chunks = self.chunk_by_token_count(str(self._augment_with_user_prompt(data)), chunk_size)
         if doc_type is None:
-            logger.debug("Determining document type and language from first chunk...")
             doc_type = self.get_document_type(chunks[0])
             doc_lang = self.get_document_language(chunks[0])
             self.adapt("[[DOCUMENT TYPE]]\n" + doc_type.value)
