@@ -6,6 +6,7 @@ import tempfile
 import urllib.request
 from textwrap import dedent
 from typing import List, Optional
+import contextvars
 
 import nest_asyncio
 from loguru import logger
@@ -119,6 +120,7 @@ class HierarchicalSummary(ValidatedFunction):
         chunker_name: str = "RecursiveChunker",
         seed: int = 42,
         enable_initial_compression: bool = True,
+        plain_text_only: bool = False,
         engine: Optional[object] = None,
         *args,
         **kwargs,
@@ -146,6 +148,8 @@ class HierarchicalSummary(ValidatedFunction):
         self.seed = seed
         self.tokenizer_name = tokenizer_name
         self.enable_initial_compression = enable_initial_compression
+        # If True, bypass symai FileReader (and Tika) and read files via Python open(); assumes plain-text inputs
+        self.plain_text_only = plain_text_only
         self.engine = engine  # Store the engine instance
 
         # Prepare content and file metadata
@@ -170,8 +174,17 @@ class HierarchicalSummary(ValidatedFunction):
 
     def read_file(self, file_link: str):
         logger.info(f"Reading file from {file_link}")
-        reader = FileReader()
-        content = reader(file_link)
+        if self.plain_text_only:
+            # Basic Python file read assuming UTF-8 plain text
+            try:
+                with open(file_link, 'r', encoding='utf-8', errors='ignore') as f:
+                    content = f.read()
+            except Exception as e:
+                logger.error(f"Plain-text read failed for {file_link}: {e}")
+                raise
+        else:
+            reader = FileReader()
+            content = reader(file_link)
         file_name = os.path.basename(file_link)
         val = f"[[DOCUMENT::{file_name}]]: <<<\n{str(content)}\n>>>\n"
         return val, file_name
@@ -306,14 +319,27 @@ class HierarchicalSummary(ValidatedFunction):
         )
         async def summarize_chunk(chunk):
             loop = asyncio.get_event_loop()
-            forward_fn = functools.partial(
-                super(HierarchicalSummary, self).forward,
-                chunk,
-                preview=False,
-                response_format={"type": "json_object"},
-                **kwargs,
-            )
-            return await loop.run_in_executor(None, forward_fn)
+            def worker():
+                # Ensure DynamicEngine context is established in the executor thread
+                if self.engine is not None:
+                    from symai.components import DynamicEngine
+                    with DynamicEngine(model=self.engine.model, api_key=self.engine.api_key):
+                        return super(HierarchicalSummary, self).forward(
+                            chunk,
+                            preview=False,
+                            response_format={"type": "json_object"},
+                            **kwargs,
+                        )
+                else:
+                    return super(HierarchicalSummary, self).forward(
+                        chunk,
+                        preview=False,
+                        response_format={"type": "json_object"},
+                        **kwargs,
+                    )
+            # Belt-and-suspenders: propagate ContextVar context to executor, but keep worker re-entry
+            ctx = contextvars.copy_context()
+            return await loop.run_in_executor(None, lambda: ctx.run(worker))
         """Summarize all chunks concurrently.
 
         Returns:
