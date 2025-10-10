@@ -5,53 +5,52 @@ import re
 import tempfile
 import urllib.request
 from textwrap import dedent
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 import contextvars
 
-import nest_asyncio
-from loguru import logger
-from pydantic import Field, field_validator
-from symai import Import, Symbol
-from symai.components import FileReader, Function, DynamicEngine
-from symai.core_ext import bind
-from symai.models import LLMDataModel
-from tenacity import (
-    before_sleep_log,
-    retry,
-    retry_if_exception_type,
-    stop_after_attempt,
-    wait_exponential_jitter,
+from .lazy_imports import (
+    lazy_nest_asyncio, lazy_loguru, lazy_field, lazy_field_validator,
+    lazy_import_class, lazy_symbol, lazy_file_reader, lazy_function,
+    lazy_dynamic_engine, lazy_bind, lazy_llm_data_model,
+    lazy_before_sleep_log, lazy_retry, lazy_retry_if_exception_type,
+    lazy_stop_after_attempt, lazy_wait_exponential_jitter,
+    lazy_encoding, lazy_tokenizers, lazy_chonkie_chunker,
+    lazy_validated_function, lazy_type_specific_prompts, lazy_document_type,
+    get_logger
 )
-from tiktoken import Encoding
-from tokenizers import Tokenizer
-
-from .functions import ValidatedFunction
-from .types import TYPE_SPECIFIC_PROMPTS, DocumentType
-
-# Load the chunker
-ChonkieChunker = Import.load_expression("ExtensityAI/chonkie-symai", "ChonkieChunker")
+from .memoization import memoize_property, memoize_method, memoize, get_memoization_manager
 
 
 
-class Summary(LLMDataModel):
-    summary: str = Field(
-        description="An extremely comprehensive summary of the document. Do not start with 'This document is about...' or similar phrases."
-    )
-    facts: List[str] = Field(
-        description="Important facts and subjects extracted from the document."
-    )
-    quotes: Optional[List[str]] = Field(
-        default=None,
-        description="Significant quotes extracted from the document **verbatim** if there are any.",
-    )
-    type: Optional[str] = None
+def create_summary_class():
+    """Create Summary class with lazy imports."""
+    LLMDataModel = lazy_llm_data_model()
+    Field = lazy_field()
 
-    def validate():
-        # TODO: validate that quotes are verbatim from the document
-        pass
+    class Summary(LLMDataModel):
+        summary: str = Field(
+            description="An extremely comprehensive summary of the document. Do not start with 'This document is about...' or similar phrases."
+        )
+        facts: List[str] = Field(
+            description="Important facts and subjects extracted from the document."
+        )
+        quotes: Optional[List[str]] = Field(
+            default=None,
+            description="Significant quotes extracted from the document **verbatim** if there are any.",
+        )
+        type: Optional[str] = None
+
+        def validate():
+            # TODO: validate that quotes are verbatim from the document
+            pass
+
+    return Summary
+
+# Create the Summary class lazily
+Summary = create_summary_class()
 
 
-def gather(chunks: List[LLMDataModel]):
+def gather(chunks: List):
     res_dict = {}
     type_dict = {
         list: {"default": list, "func": "append"},
@@ -100,31 +99,44 @@ def always_get_an_event_loop() -> asyncio.AbstractEventLoop:
         return new_loop
 
 
-class HierarchicalSummary(ValidatedFunction):
-    # Define the prompt types as class variables
-    def __init__(
-        self,
-        file_link: str = None,
-        content: str = None,
-        document_name: str = None,
-        document_lang: str = None,
-        asset_name: str = None,
-        data_model: LLMDataModel = Summary,
-        min_num_chunks: int = 5,
-        min_chunk_size: int = 250,
-        max_chunk_size: int = 1000,
-        max_output_tokens: int = 10000,
-        user_prompt: str = None,
-        include_quotes: bool = False,
-        tokenizer_name: str = "gpt2",
-        chunker_name: str = "RecursiveChunker",
-        seed: int = 42,
-        enable_initial_compression: bool = True,
-        plain_text_only: bool = False,
-        engine: Optional[object] = None,
-        *args,
-        **kwargs,
-    ):
+class HierarchicalSummary:
+    """HierarchicalSummary class with lazy inheritance."""
+
+    def __init__(self, *args, **kwargs):
+        # Initialize base class lazily
+        ValidatedFunction = lazy_validated_function()
+        # Create a temporary instance to get the base class methods
+        self._base_instance = ValidatedFunction.__new__(ValidatedFunction)
+        ValidatedFunction.__init__(self._base_instance, *args, **kwargs)
+
+        # Copy base class attributes
+        for attr_name in dir(self._base_instance):
+            if not attr_name.startswith('_') and not hasattr(self, attr_name):
+                setattr(self, attr_name, getattr(self._base_instance, attr_name))
+
+        # Now call our own initialization
+        self._init_hierarchical_summary(*args, **kwargs)
+
+    def _init_hierarchical_summary(self, *args, **kwargs):
+        # Define the prompt types as class variables
+        file_link = kwargs.get('file_link')
+        content = kwargs.get('content')
+        document_name = kwargs.get('document_name')
+        document_lang = kwargs.get('document_lang')
+        asset_name = kwargs.get('asset_name')
+        data_model = kwargs.get('data_model')
+        min_num_chunks = kwargs.get('min_num_chunks', 5)
+        min_chunk_size = kwargs.get('min_chunk_size', 250)
+        max_chunk_size = kwargs.get('max_chunk_size', 1000)
+        max_output_tokens = kwargs.get('max_output_tokens', 10000)
+        user_prompt = kwargs.get('user_prompt')
+        include_quotes = kwargs.get('include_quotes', False)
+        tokenizer_name = kwargs.get('tokenizer_name', "gpt2")
+        chunker_name = kwargs.get('chunker_name', "RecursiveChunker")
+        seed = kwargs.get('seed', 42)
+        enable_initial_compression = kwargs.get('enable_initial_compression', True)
+        plain_text_only = kwargs.get('plain_text_only', False)
+        engine = kwargs.get('engine')
         # only allow file_link or content
         assert (file_link and not content) or (content and not file_link)
 
@@ -134,9 +146,10 @@ class HierarchicalSummary(ValidatedFunction):
         if content is not None:
             assert document_name is not None
 
+        if data_model is None:
+            data_model = Summary
+        LLMDataModel = lazy_llm_data_model()
         assert issubclass(data_model, LLMDataModel)
-
-        super().__init__(data_model=data_model, retry_count=5, *args, **kwargs)
         self.document_lang = document_lang
         self.file_link = file_link
         self.min_num_chunks = min_num_chunks
@@ -166,13 +179,87 @@ class HierarchicalSummary(ValidatedFunction):
         self.content_only = str(file_content)
 
         # init chunker
+        ChonkieChunker = lazy_chonkie_chunker()
         self.chunker = ChonkieChunker(tokenizer_name=self.tokenizer_name)
         self.chunker_type = chunker_name
 
         # Content type is unknown at initialization
         self.document_type = None
 
+    def invalidate_cache(self, cache_type: Optional[str] = None):
+        """
+        Invalidate memoization cache for this instance.
+
+        Args:
+            cache_type: Specific cache to invalidate ('prompts', 'tokens', 'documents', 'models')
+                       If None, invalidates all caches for this instance
+        """
+        manager = get_memoization_manager()
+        instance_id = id(self)
+
+        if cache_type:
+            # Invalidate specific cache
+            cache = manager.get_cache(cache_type)
+            # Find and invalidate keys for this instance
+            keys_to_remove = []
+            for key in cache._cache.keys():
+                if str(instance_id) in key:
+                    keys_to_remove.append(key)
+
+            for key in keys_to_remove:
+                cache.invalidate(key)
+        else:
+            # Invalidate all caches for this instance
+            for cache_name in ['prompts', 'tokens', 'documents', 'models']:
+                cache = manager.get_cache(cache_name)
+                keys_to_remove = []
+                for key in cache._cache.keys():
+                    if str(instance_id) in key:
+                        keys_to_remove.append(key)
+
+                for key in keys_to_remove:
+                    cache.invalidate(key)
+
+    def get_cache_stats(self) -> Dict[str, Any]:
+        """Get cache statistics for this instance."""
+        manager = get_memoization_manager()
+        instance_id = id(self)
+
+        stats = {}
+        for cache_name in ['prompts', 'tokens', 'documents', 'models']:
+            cache = manager.get_cache(cache_name)
+            cache_stats = cache.stats()
+
+            # Count keys for this instance
+            instance_keys = sum(1 for key in cache._cache.keys() if str(instance_id) in key)
+
+            stats[cache_name] = {
+                **cache_stats,
+                'instance_keys': instance_keys
+            }
+
+        return stats
+
+    def __getattr__(self, name):
+        """Delegate to base instance for missing attributes."""
+        if name == '_base_instance':
+            raise AttributeError(f"'{self.__class__.__name__}' object has no attribute '{name}'")
+        if '_base_instance' in self.__dict__:
+            return getattr(self.__dict__['_base_instance'], name)
+        raise AttributeError(f"'{self.__class__.__name__}' object has no attribute '{name}'")
+
+    def __setattr__(self, name, value):
+        """Delegate to base instance for certain attributes."""
+        if name == '_base_instance':
+            super().__setattr__(name, value)
+            return
+        if '_base_instance' in self.__dict__ and hasattr(self.__dict__['_base_instance'], name):
+            setattr(self.__dict__['_base_instance'], name, value)
+        else:
+            super().__setattr__(name, value)
+
     def read_file(self, file_link: str):
+        logger = get_logger()
         logger.info(f"Reading file from {file_link}")
         if self.plain_text_only:
             # Basic Python file read assuming UTF-8 plain text
@@ -183,6 +270,7 @@ class HierarchicalSummary(ValidatedFunction):
                 logger.error(f"Plain-text read failed for {file_link}: {e}")
                 raise
         else:
+            FileReader = lazy_file_reader()
             reader = FileReader()
             content = reader(file_link)
         file_name = os.path.basename(file_link)
@@ -190,6 +278,7 @@ class HierarchicalSummary(ValidatedFunction):
         return val, file_name
 
     def download_file(self, file_link: str):
+        logger = get_logger()
         logger.info(f"Downloading file from {file_link}")
 
         with urllib.request.urlopen(file_link) as f:
@@ -202,9 +291,10 @@ class HierarchicalSummary(ValidatedFunction):
         os.remove(tmp_file_name)
         return content, file_name
 
-    @property
+    @memoize_property('prompts', key_func=lambda self: f"prompt:{id(self)}:{self.user_prompt}:{getattr(self, 'document_type', None)}")
     def prompt(self):
         # Get type-specific prompt
+        TYPE_SPECIFIC_PROMPTS = lazy_type_specific_prompts()
         type_specific_prompt = ""
         if self.document_type and self.document_type in TYPE_SPECIFIC_PROMPTS:
             type_specific_prompt = dedent(
@@ -252,7 +342,7 @@ class HierarchicalSummary(ValidatedFunction):
         prompt_text += self.data_model.instruct_llm()
         return prompt_text
 
-    @property
+    @memoize_property('prompts', key_func=lambda self: f"static_context:{id(self)}")
     def static_context(self):
         return dedent(
             """
@@ -262,24 +352,26 @@ class HierarchicalSummary(ValidatedFunction):
         """
         )
 
-    @bind(engine="neurosymbolic", property="compute_required_tokens")(lambda: 0)
     def _compute_required_tokens(self):
-        pass
+        bind = lazy_bind()
+        return bind(engine="neurosymbolic", property="compute_required_tokens")(lambda: 0)
 
-    @bind(engine="neurosymbolic", property="max_context_tokens")
-    def _max_context_tokens(_):
-        pass
+    def _max_context_tokens(self):
+        bind = lazy_bind()
+        return bind(engine="neurosymbolic", property="max_context_tokens")
 
-    @bind(engine="neurosymbolic", property="max_response_tokens")
-    def _max_response_tokens(_):
-        pass
+    def _max_response_tokens(self):
+        bind = lazy_bind()
+        return bind(engine="neurosymbolic", property="max_response_tokens")
 
-    @bind(engine="neurosymbolic", property="compute_remaining_tokens")(lambda: 0)
     def _compute_remaining_tokens(self):
-        pass
+        bind = lazy_bind()
+        return bind(engine="neurosymbolic", property="compute_remaining_tokens")(lambda: 0)
 
+    @memoize_method('tokens', key_func=lambda self, data, count_context: f"tokens:{id(self)}:{hash(str(data))}:{count_context}:{self.seed}")
     def compute_required_tokens(self, data, count_context=True):
         # construct preview function
+        Function = lazy_function()
         if count_context:
             preview_function = Function(
                 prompt=self.prompt,
@@ -303,12 +395,21 @@ class HierarchicalSummary(ValidatedFunction):
     def split_words(self, text):
         return re.split(r"(\W+)", text)
 
+    @memoize_method('documents', key_func=lambda self, text, chunk_size, include_context: f"chunks:{id(self)}:{hash(text)}:{chunk_size}:{include_context}:{self.chunker_type}")
     def chunk_by_token_count(self, text, chunk_size, include_context=False):
         # prepare results
+        Symbol = lazy_symbol()
         chunks = self.chunker(data=Symbol(text), chunker_name=self.chunker_type, chunk_size=chunk_size)
         return chunks
 
     async def summarize_chunks(self, chunks, **kwargs):
+        retry = lazy_retry()
+        retry_if_exception_type = lazy_retry_if_exception_type()
+        wait_exponential_jitter = lazy_wait_exponential_jitter()
+        stop_after_attempt = lazy_stop_after_attempt()
+        before_sleep_log = lazy_before_sleep_log()
+        logger = get_logger()
+
         @retry(
             retry=retry_if_exception_type(Exception),
             wait=wait_exponential_jitter(initial=0.25, max=60),
@@ -320,7 +421,7 @@ class HierarchicalSummary(ValidatedFunction):
             def worker():
                 # Ensure DynamicEngine context is established in the executor thread
                 if self.engine is not None:
-                    from symai.components import DynamicEngine
+                    DynamicEngine = lazy_dynamic_engine()
                     with DynamicEngine(model=self.engine.model, api_key=self.engine.api_key):
                         return super(HierarchicalSummary, self).forward(
                             chunk,
@@ -380,7 +481,15 @@ class HierarchicalSummary(ValidatedFunction):
         else:
             return self.min_chunk_size
 
+    @memoize_method('models', key_func=lambda self, content: f"doc_type:{id(self)}:{hash(content)}:{self.seed}")
     def get_document_type(self, content):
+        # Lazy imports
+        DocumentType = lazy_document_type()
+        LLMDataModel = lazy_llm_data_model()
+        field_validator = lazy_field_validator()
+        ValidatedFunction = lazy_validated_function()
+        DynamicEngine = lazy_dynamic_engine()
+
         # Prepare a list of all values in the enum DocumentType
         allowed_types = [doc_type.value for doc_type in DocumentType]
 
@@ -424,12 +533,17 @@ class HierarchicalSummary(ValidatedFunction):
             )
 
         # Store the content type for use in prompt
-
         self.document_type = DocumentType(res.type)
 
         return self.document_type
 
+    @memoize_method('models', key_func=lambda self, content: f"doc_lang:{id(self)}:{hash(content)}:{self.document_lang}:{self.seed}")
     def get_document_language(self, content):
+        # Lazy imports
+        LLMDataModel = lazy_llm_data_model()
+        ValidatedFunction = lazy_validated_function()
+        DynamicEngine = lazy_dynamic_engine()
+
         class ContentLanguage(LLMDataModel):
             language: str
 
@@ -467,20 +581,22 @@ class HierarchicalSummary(ValidatedFunction):
 
         return res.language
 
-    def forward(self, **kwargs) -> Summary:
+    def forward(self, **kwargs):
         self.clear()
 
         # If an engine is provided, wrap all processing with DynamicEngine context
         if self.engine is not None:
+            DynamicEngine = lazy_dynamic_engine()
             with DynamicEngine(model=self.engine.model, api_key=self.engine.api_key):
                 return self._forward_with_engine(**kwargs)
         else:
             return self._forward_with_engine(**kwargs)
 
-    def _forward_with_engine(self, **kwargs) -> Summary:
+    def _forward_with_engine(self, **kwargs):
         # compute required tokens
         total_tokens = self.compute_required_tokens_graceful(self.content, count_context=False)
         if total_tokens is None:
+            logger = get_logger()
             logger.warning("Total tokens could not be determined.")
             total_tokens = 1
 
@@ -497,8 +613,10 @@ class HierarchicalSummary(ValidatedFunction):
             self.adapt("[[DOCUMENT TYPE]]\n" + doc_type.value)
             self.adapt("[[DOCUMENT LANGUAGE]]\n" + doc_lang)
 
+        nest_asyncio = lazy_nest_asyncio()
         nest_asyncio.apply()
         loop = always_get_an_event_loop()
+        logger = get_logger()
         logger.debug(f"Processing {len(chunks)} chunks (initial summarization)...")
         res, _orig_chunk_count = loop.run_until_complete(
             self.summarize_chunks(chunks, **kwargs)
@@ -581,6 +699,7 @@ class HierarchicalSummary(ValidatedFunction):
         try:
             return self.compute_required_tokens(data, count_context=count_context)
         except NotImplementedError:
+            logger = get_logger()
             logger.debug(
                 "compute_required_tokens is not implemented for this engine, returning None"
             )
@@ -612,7 +731,7 @@ class HierarchicalSummary(ValidatedFunction):
             pruned.append(x)
         return pruned
 
-    def _deduplicate_list_fields(self, res: LLMDataModel) -> LLMDataModel:
+    def _deduplicate_list_fields(self, res) -> object:
         """Deduplicate all list fields of a model instance in-place and return it."""
         for fname, finfo in res.model_fields.items():
             if getattr(finfo, "exclude", False):
@@ -621,6 +740,7 @@ class HierarchicalSummary(ValidatedFunction):
             if isinstance(val, list):
                 deduped = self._deduplicate_list(val)
                 if len(deduped) != len(val):
+                    logger = get_logger()
                     logger.debug(
                         f"Deduplicated list field '{fname}' from {len(val)} -> {len(deduped)} items"
                     )
@@ -632,6 +752,7 @@ class HierarchicalSummary(ValidatedFunction):
 
         Only replaces the field if the recursive result is not longer than the original.
         """
+        logger = get_logger()
         logger.debug(f"Attempting recursive compression for field '{field_name}' (len={len(text)}, attempt {attempt})")
         if not text or len(text) < 1024:  # Skip tiny strings to save cost
             return text

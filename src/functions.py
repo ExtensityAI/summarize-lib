@@ -1,25 +1,60 @@
-import numpy as np
-from loguru import logger
-from pydantic import ValidationError
-from symai.components import Function
-from symai.models import LLMDataModel
+from .lazy_imports import (
+    lazy_numpy, lazy_loguru, lazy_validation_error,
+    lazy_function, lazy_llm_data_model, get_logger, get_random_state, get_int16_max
+)
 
 ############################################################################################################
 # ValidatedFunction
 ############################################################################################################
 
 
-class ValidatedFunction(Function):
+class ValidatedFunction:
+    """ValidatedFunction class with lazy inheritance."""
+
     def __init__(
         self,
-        data_model: LLMDataModel = None,
+        data_model=None,
         retry_count=5,
         *args,
         **kwargs,
     ):
-        super().__init__(*args, **kwargs)
+        # Lazy import of base class
+        Function = lazy_function()
+        LLMDataModel = lazy_llm_data_model()
+
+        # Validate data_model type
+        if data_model is not None and not issubclass(data_model, LLMDataModel):
+            raise TypeError("data_model must be a subclass of LLMDataModel")
+
+        # Create base instance for delegation
+        self._base_instance = Function.__new__(Function)
+        Function.__init__(self._base_instance, *args, **kwargs)
+
+        # Copy base class attributes
+        for attr_name in dir(self._base_instance):
+            if not attr_name.startswith('_') and not hasattr(self, attr_name):
+                setattr(self, attr_name, getattr(self._base_instance, attr_name))
+
         self.retry_count = retry_count
         self.data_model = data_model
+
+    def __getattr__(self, name):
+        """Delegate to base instance for missing attributes."""
+        if name == '_base_instance':
+            raise AttributeError(f"'{self.__class__.__name__}' object has no attribute '{name}'")
+        if '_base_instance' in self.__dict__:
+            return getattr(self.__dict__['_base_instance'], name)
+        raise AttributeError(f"'{self.__class__.__name__}' object has no attribute '{name}'")
+
+    def __setattr__(self, name, value):
+        """Delegate to base instance for certain attributes."""
+        if name == '_base_instance':
+            super().__setattr__(name, value)
+            return
+        if '_base_instance' in self.__dict__ and hasattr(self.__dict__['_base_instance'], name):
+            setattr(self.__dict__['_base_instance'], name, value)
+        else:
+            super().__setattr__(name, value)
 
     def prepare_seeds(self, num_seeds: int, **kwargs):
         # get list of seeds for remedy (to avoid same remedy for same input)
@@ -30,13 +65,13 @@ class ValidatedFunction(Function):
         else:
             seed = 42
 
-        rnd = np.random.RandomState(seed=seed)
+        rnd = get_random_state(seed)
         seeds = rnd.randint(
-            0, np.iinfo(np.int16).max, size=num_seeds, dtype=np.int16
+            0, get_int16_max(), size=num_seeds, dtype='int16'
         ).tolist()
         return seeds
 
-    def simplify_validation_errors(self, error: ValidationError) -> str:
+    def simplify_validation_errors(self, error) -> str:
         """
         Simplifies Pydantic validation errors into a concise, LLM-friendly format, including lists and nested elements.
 
@@ -82,6 +117,7 @@ class ValidatedFunction(Function):
         remedy_seeds = self.prepare_seeds(self.retry_count, **kwargs)
 
         # prepare remedy function
+        Function = lazy_function()
         remedy_function = Function(
             """
             [Task]
@@ -116,12 +152,14 @@ class ValidatedFunction(Function):
         # Ensure valid JSON is returned
         result = None
         last_error = ""
+        ValidationError = lazy_validation_error()
         for i in range(self.retry_count):
             try:
                 # try to validate against provided data model
                 result = self.data_model.model_validate_json(maybe_json, strict=True)
                 break
             except ValidationError as e:
+                logger = get_logger()
                 logger.debug(e)
                 # collect and format error messages
                 error_str = self.simplify_validation_errors(e)
