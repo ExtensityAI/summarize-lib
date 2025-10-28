@@ -5,12 +5,7 @@ This package provides lazy-loaded classes and utilities for document summarizati
 All heavy dependencies are loaded on-demand to improve startup performance.
 """
 
-# Import classes directly for symai Import.load_expression() compatibility
-from .hierarchical import HierarchicalSummary, Summary
-from .functions import ValidatedFunction
-from .types import DocumentType, TYPE_SPECIFIC_PROMPTS
-
-# Also export lazy accessors for internal use
+# Export main classes with lazy loading
 from .lazy_imports import (
     lazy_hierarchical_summary,
     lazy_summary,
@@ -19,7 +14,7 @@ from .lazy_imports import (
     lazy_validated_function
 )
 
-# Create lazy accessors for backward compatibility
+# Create lazy accessors for main exports
 def get_hierarchical_summary():
     """Get HierarchicalSummary class lazily."""
     return lazy_hierarchical_summary()
@@ -41,11 +36,6 @@ def get_validated_function():
     return lazy_validated_function()
 
 __all__ = [
-    'HierarchicalSummary',
-    'Summary',
-    'ValidatedFunction',
-    'DocumentType',
-    'TYPE_SPECIFIC_PROMPTS',
     'get_hierarchical_summary',
     'get_summary',
     'get_document_type',
