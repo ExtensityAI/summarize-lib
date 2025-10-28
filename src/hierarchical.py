@@ -135,10 +135,14 @@ class HierarchicalSummary:
         self._base_instance = ValidatedFunction.__new__(ValidatedFunction)
         ValidatedFunction.__init__(self._base_instance, *args, **kwargs)
 
-        # Copy base class attributes
+        # Copy base class attributes (skip properties that might not be ready yet)
         for attr_name in dir(self._base_instance):
             if not attr_name.startswith('_') and not hasattr(self, attr_name):
-                setattr(self, attr_name, getattr(self._base_instance, attr_name))
+                try:
+                    setattr(self, attr_name, getattr(self._base_instance, attr_name))
+                except (TypeError, AttributeError):
+                    # Skip attributes that can't be accessed yet or cause conversion errors
+                    pass
 
         # Now call our own initialization
         self._init_hierarchical_summary(*args, **kwargs)
