@@ -38,10 +38,6 @@ class ValidatedFunction:
         self.retry_count = retry_count
         self.data_model = data_model
 
-    def __call__(self, *args, **kwargs):
-        """Make the instance callable like a Function."""
-        return self._base_instance(*args, **kwargs)
-
     def __getattr__(self, name):
         """Delegate to base instance for missing attributes."""
         if name == '_base_instance':

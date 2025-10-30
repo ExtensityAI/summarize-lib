@@ -290,12 +290,6 @@ class HierarchicalSummary:
         self._token_offset = 0
         self._total_tokens_processed = 0
 
-    def __call__(self, *args, **kwargs):
-        """Make the instance callable like a Function."""
-        # Use object.__getattribute__ to get the base instance without triggering properties
-        base_instance = object.__getattribute__(self, '_base_instance')
-        return base_instance(*args, **kwargs)
-
     def __getattr__(self, name):
         """Delegate to base instance for missing attributes."""
         if name == '_base_instance':
