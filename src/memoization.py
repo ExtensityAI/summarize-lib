@@ -78,15 +78,6 @@ class ThreadSafeLRUCache:
             while len(self._cache) > self.max_size:
                 self._cache.popitem(last=False)
 
-            # Log cache size warnings for tokenizer cache
-            if hasattr(self, '_cache_name') and self._cache_name == 'tokenizers':
-                cache_size = len(self._cache)
-                if cache_size > 2:
-                    import logging
-                    logger = logging.getLogger(__name__)
-                    logger.warning(f"Tokenizer cache size is {cache_size}, which exceeds recommended maximum of 2. "
-                                 f"Consider reducing tokenizer usage or increasing cache size.")
-
     def clear(self) -> None:
         """Clear all items from the cache."""
         with self._lock:
@@ -147,18 +138,12 @@ class MemoizationManager:
         # Model computation cache - medium size, long TTL
         self._caches['models'] = ThreadSafeLRUCache(max_size=96, ttl=1800)  # 30 minutes
 
-        # Tokenizer cache - should normally be 1, warn if >2
-        self._caches['tokenizers'] = ThreadSafeLRUCache(max_size=1, ttl=None)
-
     def get_cache(self, name: str) -> ThreadSafeLRUCache:
         """Get a cache by name."""
         with self._lock:
             if name not in self._caches:
                 self._caches[name] = ThreadSafeLRUCache()
-            cache = self._caches[name]
-            # Set cache name for monitoring
-            cache._cache_name = name
-            return cache
+            return self._caches[name]
 
     def clear_cache(self, name: Optional[str] = None):
         """Clear a specific cache or all caches."""

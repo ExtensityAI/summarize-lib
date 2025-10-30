@@ -16,35 +16,9 @@ from .lazy_imports import (
     lazy_stop_after_attempt, lazy_wait_exponential_jitter,
     lazy_encoding, lazy_tokenizers, lazy_chonkie_chunker,
     lazy_validated_function, lazy_type_specific_prompts, lazy_document_type,
-    get_logger, lazy_symai, lazy_tiktoken
+    get_logger
 )
 from .memoization import memoize_property, memoize_method, memoize, get_memoization_manager
-
-
-def get_current_tokenizer():
-    """Get the tokenizer from the current engine."""
-    try:
-        symai = lazy_symai()
-        EngineRepository = symai.EngineRepository
-
-        engine_repo = EngineRepository()
-
-        # Try to get dynamic engine first
-        current_engine = engine_repo.get_dynamic_engine_instance()
-
-        if current_engine and hasattr(current_engine, 'tokenizer'):
-            return current_engine.tokenizer
-
-        # Fallback to registered neurosymbolic engine
-        engine = engine_repo.get('neurosymbolic')
-        if engine and hasattr(engine, 'tokenizer'):
-            return engine.tokenizer
-
-        return None
-    except Exception as e:
-        logger = get_logger()
-        logger.debug(f"Could not get tokenizer from symai: {e}")
-        return None
 
 
 
@@ -212,10 +186,6 @@ class HierarchicalSummary:
         # Content type is unknown at initialization
         self.document_type = None
 
-        # Token tracking for logging
-        self._token_offset = 0
-        self._total_tokens_processed = 0
-
     def invalidate_cache(self, cache_type: Optional[str] = None):
         """
         Invalidate memoization cache for this instance.
@@ -269,26 +239,6 @@ class HierarchicalSummary:
             }
 
         return stats
-
-    def _log_token_usage(self, tokens_added: int, operation: str = "processing"):
-        """Log token usage for monitoring and debugging."""
-        self._total_tokens_processed += tokens_added
-        logger = get_logger()
-        logger.debug(f"Token usage - {operation}: +{tokens_added} tokens "
-                    f"(total processed: {self._total_tokens_processed}, offset: {self._token_offset})")
-
-    def get_token_stats(self) -> Dict[str, int]:
-        """Get current token statistics."""
-        return {
-            'total_processed': self._total_tokens_processed,
-            'offset': self._token_offset,
-            'net_tokens': self._total_tokens_processed - self._token_offset
-        }
-
-    def reset_token_tracking(self):
-        """Reset token tracking counters."""
-        self._token_offset = 0
-        self._total_tokens_processed = 0
 
     def __getattr__(self, name):
         """Delegate to base instance for missing attributes."""
@@ -418,59 +368,8 @@ class HierarchicalSummary:
         bind = lazy_bind()
         return bind(engine="neurosymbolic", property="compute_remaining_tokens")(lambda: 0)
 
-    def _fast_path_token_count(self, text: str) -> Optional[int]:
-        """
-        Fast-path token counting that bypasses Function(preview=...) when only counting tokens.
-        Uses direct tokenizer encoding for maximum performance.
-        """
-        try:
-            # Try to get tokenizer from symai first
-            tokenizer = get_current_tokenizer()
-            if tokenizer:
-                tokens = tokenizer.encode(text)
-                token_count = len(tokens)
-                self._log_token_usage(token_count, "fast-path counting")
-                return token_count
-
-            # Fallback to tiktoken if available
-            tiktoken = lazy_tiktoken()
-            try:
-                encoding = tiktoken.get_encoding("gpt2")  # Default encoding
-                tokens = encoding.encode(text)
-                token_count = len(tokens)
-                self._log_token_usage(token_count, "fast-path counting (tiktoken)")
-                return token_count
-            except Exception:
-                pass
-
-            # Fallback to tokenizers library
-            tokenizers = lazy_tokenizers()
-            try:
-                tokenizer = tokenizers.Tokenizer.from_pretrained(self.tokenizer_name)
-                tokens = tokenizer.encode(text)
-                token_count = len(tokens.tokens)
-                self._log_token_usage(token_count, "fast-path counting (tokenizers)")
-                return token_count
-            except Exception:
-                pass
-
-            return None
-        except Exception as e:
-            logger = get_logger()
-            logger.debug(f"Fast-path token counting failed: {e}")
-            return None
-
     @memoize_method('tokens', key_func=lambda self, data, count_context: f"tokens:{id(self)}:{hash(str(data))}:{count_context}:{self.seed}")
     def compute_required_tokens(self, data, count_context=True):
-        # Fast-path: if not counting context, try direct token counting first
-        if not count_context:
-            fast_count = self._fast_path_token_count(str(data))
-            if fast_count is not None:
-                logger = get_logger()
-                logger.debug(f"Fast-path token count: {fast_count} tokens")
-                return fast_count
-
-        # Fallback to original method with Function preview
         # construct preview function
         Function = lazy_function()
         if count_context:
@@ -491,10 +390,7 @@ class HierarchicalSummary:
         )
 
         # count prompt tokens
-        token_count = self._compute_required_tokens(preview.prop.prepared_input)
-        if token_count is not None:
-            self._log_token_usage(token_count, "Function preview counting")
-        return token_count
+        return self._compute_required_tokens(preview.prop.prepared_input)
 
     def split_words(self, text):
         return re.split(r"(\W+)", text)
