@@ -135,8 +135,10 @@ class HierarchicalSummary:
         self._base_instance = ValidatedFunction.__new__(ValidatedFunction)
         ValidatedFunction.__init__(self._base_instance, *args, **kwargs)
 
-        # Don't copy attributes eagerly - let __getattr__ delegate instead
-        # This avoids triggering lazy property descriptors during initialization
+        # Copy base class attributes
+        for attr_name in dir(self._base_instance):
+            if not attr_name.startswith('_') and not hasattr(self, attr_name):
+                setattr(self, attr_name, getattr(self._base_instance, attr_name))
 
         # Now call our own initialization
         self._init_hierarchical_summary(*args, **kwargs)
@@ -298,10 +300,8 @@ class HierarchicalSummary:
         """Delegate to base instance for missing attributes."""
         if name == '_base_instance':
             raise AttributeError(f"'{self.__class__.__name__}' object has no attribute '{name}'")
-        if hasattr(self, '_base_instance'):
-            # Use getattr instead of self.__dict__ to avoid triggering property descriptors
-            base_instance = object.__getattribute__(self, '_base_instance')
-            return getattr(base_instance, name)
+        if '_base_instance' in self.__dict__:
+            return getattr(self.__dict__['_base_instance'], name)
         raise AttributeError(f"'{self.__class__.__name__}' object has no attribute '{name}'")
 
     def __setattr__(self, name, value):
@@ -309,13 +309,10 @@ class HierarchicalSummary:
         if name == '_base_instance':
             super().__setattr__(name, value)
             return
-        if hasattr(self, '_base_instance'):
-            # Use object.__getattribute__ to avoid triggering property descriptors
-            base_instance = object.__getattribute__(self, '_base_instance')
-            if hasattr(base_instance, name):
-                setattr(base_instance, name, value)
-                return
-        super().__setattr__(name, value)
+        if '_base_instance' in self.__dict__ and hasattr(self.__dict__['_base_instance'], name):
+            setattr(self.__dict__['_base_instance'], name, value)
+        else:
+            super().__setattr__(name, value)
 
     def read_file(self, file_link: str):
         logger = get_logger()
