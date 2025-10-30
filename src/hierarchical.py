@@ -527,18 +527,14 @@ class HierarchicalSummary:
                 if self.engine is not None:
                     DynamicEngine = lazy_dynamic_engine()
                     with DynamicEngine(model=self.engine.model, api_key=self.engine.api_key):
-                        # Use object.__getattribute__ to avoid triggering property descriptors
-                        base_instance = object.__getattribute__(self, '_base_instance')
-                        return base_instance.forward(
+                        return super(HierarchicalSummary, self).forward(
                             chunk,
                             preview=False,
                             response_format={"type": "json_object"},
                             **kwargs,
                         )
                 else:
-                    # Use object.__getattribute__ to avoid triggering property descriptors
-                    base_instance = object.__getattribute__(self, '_base_instance')
-                    return base_instance.forward(
+                    return super(HierarchicalSummary, self).forward(
                         chunk,
                         preview=False,
                         response_format={"type": "json_object"},
