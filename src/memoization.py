@@ -158,15 +158,14 @@ class MemoizationManager:
         """Invalidate all keys matching a pattern."""
         with self._lock:
             for cache in self._caches.values():
-                # Acquire cache lock once to avoid lock contention
-                with cache._lock:
-                    # Collect keys to remove while holding the lock
-                    keys_to_remove = [key for key in cache._cache.keys() if pattern in key]
+                # Simple pattern matching - can be enhanced
+                keys_to_remove = []
+                for key in cache._cache.keys():
+                    if pattern in key:
+                        keys_to_remove.append(key)
 
-                    # Remove keys directly to avoid calling invalidate() which would acquire lock again
-                    for key in keys_to_remove:
-                        if key in cache._cache:  # Double-check inside lock
-                            del cache._cache[key]
+                for key in keys_to_remove:
+                    cache.invalidate(key)
 
     def get_stats(self) -> Dict[str, Dict[str, Any]]:
         """Get statistics for all caches."""
@@ -181,16 +180,6 @@ _memoization_manager = MemoizationManager()
 def get_memoization_manager() -> MemoizationManager:
     """Get the global memoization manager."""
     return _memoization_manager
-
-
-def _generate_cache_key(args, kwargs, key_func: Optional[Callable] = None) -> str:
-    """Helper function to generate cache key consistently."""
-    if key_func:
-        return key_func(*args, **kwargs)
-    else:
-        # Default key generation
-        key_data = str(args) + str(sorted(kwargs.items()))
-        return hashlib.md5(key_data.encode()).hexdigest()
 
 
 def memoize(cache_name: str, key_func: Optional[Callable] = None, ttl: Optional[float] = None):
@@ -211,25 +200,23 @@ def memoize(cache_name: str, key_func: Optional[Callable] = None, ttl: Optional[
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
             # Generate cache key
-            key = _generate_cache_key(args, kwargs, key_func)
+            if key_func:
+                key = key_func(*args, **kwargs)
+            else:
+                # Default key generation
+                key_data = str(args) + str(sorted(kwargs.items()))
+                key = hashlib.md5(key_data.encode()).hexdigest()
 
             # Try to get from cache
             result = cache.get(key)
             if result is not None:
                 return result
 
-            # Compute result WITHIN the cache's lock to prevent race conditions
-            with cache._lock:
-                # Double-check after acquiring lock
-                result = cache.get(key)
-                if result is not None:
-                    return result
+            # Compute result
+            result = func(*args, **kwargs)
 
-                # Compute result
-                result = func(*args, **kwargs)
-
-                # Store in cache
-                cache.put(key, result)
+            # Store in cache
+            cache.put(key, result)
 
             return result
 
@@ -239,7 +226,11 @@ def memoize(cache_name: str, key_func: Optional[Callable] = None, ttl: Optional[
 
         def invalidate_cache(*args, **kwargs):
             """Invalidate cache for specific arguments."""
-            key = _generate_cache_key(args, kwargs, key_func)
+            if key_func:
+                key = key_func(*args, **kwargs)
+            else:
+                key_data = str(args) + str(sorted(kwargs.items()))
+                key = hashlib.md5(key_data.encode()).hexdigest()
             cache.invalidate(key)
 
         wrapper.invalidate_cache = invalidate_cache
@@ -248,17 +239,6 @@ def memoize(cache_name: str, key_func: Optional[Callable] = None, ttl: Optional[
         return wrapper
 
     return decorator
-
-
-def _generate_method_cache_key(self, args, kwargs, key_func: Optional[Callable] = None) -> str:
-    """Helper function to generate cache key for methods consistently."""
-    if key_func:
-        return key_func(self, *args, **kwargs)
-    else:
-        # Default key generation including instance
-        instance_id = id(self)
-        key_data = f"{instance_id}:{str(args)}:{str(sorted(kwargs.items()))}"
-        return hashlib.md5(key_data.encode()).hexdigest()
 
 
 def memoize_method(cache_name: str, key_func: Optional[Callable] = None):
@@ -278,25 +258,24 @@ def memoize_method(cache_name: str, key_func: Optional[Callable] = None):
         @functools.wraps(func)
         def wrapper(self, *args, **kwargs):
             # Generate cache key including instance ID
-            key = _generate_method_cache_key(self, args, kwargs, key_func)
+            if key_func:
+                key = key_func(self, *args, **kwargs)
+            else:
+                # Default key generation including instance
+                instance_id = id(self)
+                key_data = f"{instance_id}:{str(args)}:{str(sorted(kwargs.items()))}"
+                key = hashlib.md5(key_data.encode()).hexdigest()
 
             # Try to get from cache
             result = cache.get(key)
             if result is not None:
                 return result
 
-            # Compute result WITHIN the cache's lock to prevent race conditions
-            with cache._lock:
-                # Double-check after acquiring lock
-                result = cache.get(key)
-                if result is not None:
-                    return result
+            # Compute result
+            result = func(self, *args, **kwargs)
 
-                # Compute result
-                result = func(self, *args, **kwargs)
-
-                # Store in cache
-                cache.put(key, result)
+            # Store in cache
+            cache.put(key, result)
 
             return result
 
@@ -306,7 +285,12 @@ def memoize_method(cache_name: str, key_func: Optional[Callable] = None):
 
         def invalidate_instance_cache(self, *args, **kwargs):
             """Invalidate cache for this instance."""
-            key = _generate_method_cache_key(self, args, kwargs, key_func)
+            if key_func:
+                key = key_func(self, *args, **kwargs)
+            else:
+                instance_id = id(self)
+                key_data = f"{instance_id}:{str(args)}:{str(sorted(kwargs.items()))}"
+                key = hashlib.md5(key_data.encode()).hexdigest()
             cache.invalidate(key)
 
         wrapper.invalidate_instance_cache = invalidate_instance_cache
@@ -314,14 +298,6 @@ def memoize_method(cache_name: str, key_func: Optional[Callable] = None):
         return wrapper
 
     return decorator
-
-
-def _generate_property_cache_key(self, func_name: str, key_func: Optional[Callable] = None) -> str:
-    """Helper function to generate cache key for properties consistently."""
-    if key_func:
-        return key_func(self)
-    else:
-        return f"{id(self)}:{func_name}"
 
 
 def memoize_property(cache_name: str, key_func: Optional[Callable] = None):
@@ -340,31 +316,30 @@ def memoize_property(cache_name: str, key_func: Optional[Callable] = None):
 
         def getter(self):
             # Generate cache key
-            key = _generate_property_cache_key(self, func.__name__, key_func)
+            if key_func:
+                key = key_func(self)
+            else:
+                key = f"{id(self)}:{func.__name__}"
 
             # Try to get from cache
             result = cache.get(key)
             if result is not None:
                 return result
 
-            # Compute result WITHIN the cache's lock to prevent race conditions
-            with cache._lock:
-                # Double-check after acquiring lock
-                result = cache.get(key)
-                if result is not None:
-                    return result
+            # Compute result
+            result = func(self)
 
-                # Compute result
-                result = func(self)
-
-                # Store in cache
-                cache.put(key, result)
+            # Store in cache
+            cache.put(key, result)
 
             return result
 
         def setter(self, value):
             # Invalidate cache when property is set
-            key = _generate_property_cache_key(self, func.__name__, key_func)
+            if key_func:
+                key = key_func(self)
+            else:
+                key = f"{id(self)}:{func.__name__}"
             cache.invalidate(key)
 
             # Set the actual value
@@ -373,7 +348,10 @@ def memoize_property(cache_name: str, key_func: Optional[Callable] = None):
 
         def deleter(self):
             # Invalidate cache when property is deleted
-            key = _generate_property_cache_key(self, func.__name__, key_func)
+            if key_func:
+                key = key_func(self)
+            else:
+                key = f"{id(self)}:{func.__name__}"
             cache.invalidate(key)
 
             # Delete the actual value
