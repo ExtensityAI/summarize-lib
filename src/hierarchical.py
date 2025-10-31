@@ -1,17 +1,16 @@
 import asyncio
-import functools
+import contextvars
 import os
 import re
 import tempfile
 import threading
 import urllib.request
 from textwrap import dedent
-from typing import List, Optional, Dict
-import contextvars
+from typing import List, Optional
 
 import nest_asyncio
 from loguru import logger
-from pydantic import Field, field_validator
+from pydantic import field_validator
 from symai import Import, Symbol
 from symai.components import FileReader, Function, DynamicEngine
 from symai.core_ext import bind
@@ -23,214 +22,14 @@ from tenacity import (
     stop_after_attempt,
     wait_exponential_jitter,
 )
+
 from .functions import ValidatedFunction
+from .models import Summary, gather
+from .tokenizer import count_tokens_fast
 from .types import TYPE_SPECIFIC_PROMPTS, DocumentType
+from .utils import always_get_an_event_loop
 
 # ChonkieChunker will be loaded lazily when needed
-
-# Tokenizer cache: thread-safe cache with max size enforcement
-_TOKENIZER_CACHE: Dict[str, object] = {}
-_TOKENIZER_CACHE_LOCK = threading.RLock()
-_TOKENIZER_CACHE_MAX_SIZE = 1  # Normally should be 1
-
-
-def get_current_tokenizer():
-    """Get the tokenizer from the current engine.
-
-    Returns:
-        tokenizer object or None if not available
-    """
-    try:
-        from symai import EngineRepository
-
-        engine_repo = EngineRepository()
-
-        # Try to get dynamic engine first
-        current_engine = engine_repo.get_dynamic_engine_instance()
-
-        if current_engine and hasattr(current_engine, 'tokenizer'):
-            return current_engine.tokenizer
-
-        # Fallback to registered neurosymbolic engine
-        engine = engine_repo.get('neurosymbolic')
-        if engine and hasattr(engine, 'tokenizer'):
-            return engine.tokenizer
-
-        return None
-    except Exception as e:
-        logger.debug(f"Failed to get tokenizer from engine: {e}")
-        return None
-
-
-def _get_cached_tokenizer(cache_key: str = "default"):
-    """Get tokenizer from cache or fetch and cache it.
-
-    Args:
-        cache_key: Key for the cache (currently unused, kept for future extensibility)
-
-    Returns:
-        tokenizer object or None if not available
-    """
-    global _TOKENIZER_CACHE
-
-    with _TOKENIZER_CACHE_LOCK:
-        # Check cache size and warn if exceeded
-        cache_size = len(_TOKENIZER_CACHE)
-        if cache_size > 2:
-            logger.warning(
-                f"Tokenizer cache size ({cache_size}) exceeds expected maximum (2). "
-                f"This may indicate a memory leak or inefficient caching."
-            )
-        elif cache_size > _TOKENIZER_CACHE_MAX_SIZE:
-            logger.debug(
-                f"Tokenizer cache size ({cache_size}) exceeds normal maximum ({_TOKENIZER_CACHE_MAX_SIZE})."
-            )
-
-        # Log current cache size
-        if cache_size > 0:
-            logger.debug(f"Tokenizer cache size: {cache_size}")
-
-        # Use cache key for potential future multi-tokenizer support
-        if cache_key in _TOKENIZER_CACHE:
-            return _TOKENIZER_CACHE[cache_key]
-
-        # Fetch tokenizer
-        tokenizer = get_current_tokenizer()
-
-        if tokenizer is not None:
-            # Enforce max cache size: remove oldest entry if needed (FIFO)
-            if len(_TOKENIZER_CACHE) >= _TOKENIZER_CACHE_MAX_SIZE:
-                # Remove first (oldest) entry
-                oldest_key = next(iter(_TOKENIZER_CACHE))
-                del _TOKENIZER_CACHE[oldest_key]
-                logger.debug(f"Removed oldest tokenizer from cache (key: {oldest_key})")
-
-            _TOKENIZER_CACHE[cache_key] = tokenizer
-            logger.debug(f"Cached tokenizer (key: {cache_key})")
-
-        return tokenizer
-
-
-def count_tokens_fast(text, log_offset: bool = False) -> Optional[int]:
-    """Fast-path token counting using direct tokenizer encoding.
-
-    Bypasses Function(preview=...) when only counting tokens.
-
-    Args:
-        text: Text to count tokens for (str, LLMDataModel, or other object that can be converted to string)
-        log_offset: If True, log tokens added as offset
-
-    Returns:
-        Number of tokens or None if tokenizer not available
-    """
-    tokenizer = _get_cached_tokenizer()
-
-    if tokenizer is None:
-        return None
-
-    try:
-        # Convert input to string representation
-        if isinstance(text, LLMDataModel):
-            # For LLMDataModel, convert to JSON string
-            text_str = text.model_dump_json()
-        else:
-            text_str = str(text)
-
-        # Direct encoding for fast token count
-        if hasattr(tokenizer, 'encode'):
-            tokens = tokenizer.encode(text_str)
-
-            # Handle different tokenizer return types
-            if isinstance(tokens, (list, tuple)):
-                token_count = len(tokens)
-            elif hasattr(tokens, 'shape'):
-                # Handle numpy/torch tensors
-                token_count = tokens.shape[0] if len(tokens.shape) > 0 else len(tokens)
-            elif hasattr(tokens, '__len__'):
-                # Handle other sequence-like types
-                token_count = len(tokens)
-            else:
-                logger.debug(f"Unsupported tokenizer return type: {type(tokens)}")
-                return None
-
-            if token_count is not None and log_offset:
-                logger.debug(f"Tokens added (offset): {token_count}")
-
-            return token_count
-        else:
-            logger.debug("Tokenizer does not have encode method")
-            return None
-    except Exception as e:
-        logger.debug(f"Fast token counting failed: {e}")
-        return None
-
-
-
-class Summary(LLMDataModel):
-    summary: str = Field(
-        description="An extremely comprehensive summary of the document. Do not start with 'This document is about...' or similar phrases."
-    )
-    facts: List[str] = Field(
-        description="Important facts and subjects extracted from the document."
-    )
-    quotes: Optional[List[str]] = Field(
-        default=None,
-        description="Significant quotes extracted from the document **verbatim** if there are any.",
-    )
-    type: Optional[str] = None
-
-    def validate():
-        # TODO: validate that quotes are verbatim from the document
-        pass
-
-
-def gather(chunks: List[LLMDataModel]):
-    res_dict = {}
-    type_dict = {
-        list: {"default": list, "func": "append"},
-        str: {"default": str, "func": "concatenate"},
-    }
-    for chunk in chunks:
-        chunk_fields = chunk.model_fields
-        for field_name, field_type in chunk_fields.items():
-            field = getattr(chunk, field_name)
-            if type(field) in type_dict and not field_type.exclude:
-                _type = type_dict[type(field)]
-                # setup field
-                if field_name not in res_dict:
-                    res_dict[field_name] = type(field)()
-
-                # append or concatenate
-                if _type["func"] == "append":
-                    res_dict[field_name].extend(field)
-                elif _type["func"] == "concatenate":
-                    res_dict[field_name] += field + "\n"
-
-    return res_dict
-
-
-def always_get_an_event_loop() -> asyncio.AbstractEventLoop:
-    """
-    Ensure that there is always an event loop available.
-
-    This function tries to get the current event loop. If the current event loop is closed or does not exist,
-    it creates a new event loop and sets it as the current event loop.
-
-    Returns:
-        asyncio.AbstractEventLoop: The current or newly created event loop.
-    """
-    try:
-        # Try to get the current event loop
-        current_loop = asyncio.get_event_loop()
-        if current_loop.is_closed():
-            raise RuntimeError("Event loop is closed.")
-        return current_loop
-
-    except RuntimeError:
-        # If no event loop exists or it is closed, create a new one
-        new_loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(new_loop)
-        return new_loop
 
 
 class HierarchicalSummary(ValidatedFunction):
