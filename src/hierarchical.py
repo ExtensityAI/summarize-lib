@@ -3,6 +3,7 @@ import functools
 import os
 import re
 import tempfile
+import threading
 import urllib.request
 from textwrap import dedent
 from typing import List, Optional
@@ -168,6 +169,12 @@ class HierarchicalSummary(ValidatedFunction):
         # Content type is unknown at initialization
         self.document_type = None
 
+        # Prompt memoization cache (thread-safe)
+        self._prompt_lock = threading.RLock()
+        self._cached_prompt = None
+        self._cached_user_prompt = None
+        self._cached_document_type = None
+
     def read_file(self, file_link: str):
         logger.info(f"Reading file from {file_link}")
         if self.plain_text_only:
@@ -200,53 +207,72 @@ class HierarchicalSummary(ValidatedFunction):
 
     @property
     def prompt(self):
-        # Get type-specific prompt
-        type_specific_prompt = ""
-        if self.document_type and self.document_type in TYPE_SPECIFIC_PROMPTS:
-            type_specific_prompt = dedent(
-                f"""[Type-Specific Instructions]
-            For this {self.document_type.value}: {TYPE_SPECIFIC_PROMPTS[self.document_type]}"""
+        with self._prompt_lock:
+            # Check if cache is valid (user_prompt and document_type must match)
+            # The == operator correctly handles None comparisons (None == None is True)
+            if (
+                self._cached_prompt is not None
+                and self._cached_user_prompt == self.user_prompt
+                and self._cached_document_type == self.document_type
+            ):
+                return self._cached_prompt
+
+            # Build the prompt
+            # Get type-specific prompt
+            type_specific_prompt = ""
+            if self.document_type and self.document_type in TYPE_SPECIFIC_PROMPTS:
+                type_specific_prompt = dedent(
+                    f"""[Type-Specific Instructions]
+                For this {self.document_type.value}: {TYPE_SPECIFIC_PROMPTS[self.document_type]}"""
+                )
+
+            # Initialize user_prompt to handle None case
+            user_prompt = ""
+            if self.user_prompt is not None:
+                user_prompt = dedent(
+                    f"""[Goal-specific Instructions]
+                This summary is intended for a specific audience or purpose, which is defined in <purpose> below.
+                **In addition to the general summary and list of facts, ensure that if information relevant to the information below is present in the text, it is included in the summary and additional fields present in the JSON format.**
+
+                <purpose>
+                {self.user_prompt}
+                </purpose>"""
+                )
+
+            prompt_text = dedent(
+                f"""
+                [[Document Processing Task]]
+
+                [Main Objective]
+                Create an extremely comprehensive summary of the provided content and return the result as JSON.
+                The document is split up into chunks, and each chunk is summarized separately.
+                The final summary is the concatenation of all chunk summaries.
+                The type of the provided content is specified in [[CONTENT TYPE]].
+                In addition to the summary extract additional information as specified in the JSON format.
+
+                {type_specific_prompt}
+
+                {user_prompt}
+
+                [Language Requirements]
+                The summary must be in the language specified in [[CONTENT LANGUAGE]], regardless of the source material.
+
+                [Key Requirements]
+                - Summarize the content, ensuring that all relevant points are captured.
+                - Do not start the summary with phrases like 'This document is about...' or similar.
+                - Make the summary as comprehensive as necessary to cover all key points.
+                - Extract all additional information as specified in the JSON format.
+                - **Important**: Ensure that the summary is consistent with the additional information extracted.
+            """
             )
+            prompt_text += self.data_model.instruct_llm()
 
-        if self.user_prompt is not None:
-            user_prompt = dedent(
-                f"""[Goal-specific Instructions]
-            This summary is intended for a specific audience or purpose, which is defined in <purpose> below.
-            **In addition to the general summary and list of facts, ensure that if information relevant to the information below is present in the text, it is included in the summary and additional fields present in the JSON format.**
+            # Cache the result
+            self._cached_prompt = prompt_text
+            self._cached_user_prompt = self.user_prompt
+            self._cached_document_type = self.document_type
 
-            <purpose>
-            {self.user_prompt}
-            </purpose>"""
-            )
-
-        prompt_text = dedent(
-            f"""
-            [[Document Processing Task]]
-
-            [Main Objective]
-            Create an extremely comprehensive summary of the provided content and return the result as JSON.
-            The document is split up into chunks, and each chunk is summarized separately.
-            The final summary is the concatenation of all chunk summaries.
-            The type of the provided content is specified in [[CONTENT TYPE]].
-            In addition to the summary extract additional information as specified in the JSON format.
-
-            {type_specific_prompt}
-
-            {user_prompt if self.user_prompt is not None else ""}
-
-            [Language Requirements]
-            The summary must be in the language specified in [[CONTENT LANGUAGE]], regardless of the source material.
-
-            [Key Requirements]
-            - Summarize the content, ensuring that all relevant points are captured.
-            - Do not start the summary with phrases like 'This document is about...' or similar.
-            - Make the summary as comprehensive as necessary to cover all key points.
-            - Extract all additional information as specified in the JSON format.
-            - **Important**: Ensure that the summary is consistent with the additional information extracted.
-        """
-        )
-        prompt_text += self.data_model.instruct_llm()
-        return prompt_text
+            return prompt_text
 
     @property
     def static_context(self):
