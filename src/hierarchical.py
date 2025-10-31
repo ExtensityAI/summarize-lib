@@ -22,14 +22,10 @@ from tenacity import (
     stop_after_attempt,
     wait_exponential_jitter,
 )
-from tiktoken import Encoding
-from tokenizers import Tokenizer
-
 from .functions import ValidatedFunction
 from .types import TYPE_SPECIFIC_PROMPTS, DocumentType
 
-# Load the chunker
-ChonkieChunker = Import.load_expression("ExtensityAI/chonkie-symai", "ChonkieChunker")
+# ChonkieChunker will be loaded lazily when needed
 
 
 
@@ -165,8 +161,8 @@ class HierarchicalSummary(ValidatedFunction):
         self.content = f"[[DOCUMENT::{file_name}]]: <<<\n{str(file_content)}\n>>>\n"
         self.content_only = str(file_content)
 
-        # init chunker
-        self.chunker = ChonkieChunker(tokenizer_name=self.tokenizer_name)
+        # Lazy load chunker only when needed (avoids importing transformers/torch at module level)
+        self._chunker = None
         self.chunker_type = chunker_name
 
         # Content type is unknown at initialization
@@ -303,9 +299,56 @@ class HierarchicalSummary(ValidatedFunction):
     def split_words(self, text):
         return re.split(r"(\W+)", text)
 
+    def _configure_torch_cpu(self):
+        """Helper method to configure torch to use CPU operations.
+
+        Called both before and after ChonkieChunker import to ensure
+        torch is configured regardless of when it gets imported.
+        """
+        try:
+            import torch
+            if hasattr(torch, 'set_default_device'):
+                # PyTorch 2.0+: set default device to CPU
+                torch.set_default_device('cpu')
+            elif hasattr(torch, 'set_default_tensor_type'):
+                # Older PyTorch versions: use CPU tensor type
+                torch.set_default_tensor_type('torch.FloatTensor')
+        except (ImportError, Exception):
+            # torch not available, already configured, or error - that's fine
+            pass
+
+    def _get_chunker(self):
+        """Lazy load ChonkieChunker to avoid importing transformers/torch at module level.
+
+        Attempts to configure transformers/torch to disable unused engines:
+        - Sets environment variables to prefer CPU (before imports)
+        - Configures torch to prefer CPU operations (before and after import)
+        - Sets HuggingFace to prefer CPU (via environment variable)
+        """
+        if self._chunker is None:
+            # Set environment variables BEFORE any imports to prevent GPU initialization
+            # This must happen before ChonkieChunker is loaded, as it may import torch/transformers
+            if "HF_DEVICE" not in os.environ:
+                os.environ["HF_DEVICE"] = "cpu"
+
+            # Attempt to configure torch BEFORE loading ChonkieChunker
+            # If torch is already imported elsewhere, this will configure it
+            self._configure_torch_cpu()
+
+            # Load ChonkieChunker (may trigger transformers/torch imports)
+            ChonkieChunker = Import.load_expression("ExtensityAI/chonkie-symai", "ChonkieChunker")
+
+            # Configure torch again after loading (in case it was just imported)
+            self._configure_torch_cpu()
+
+            self._chunker = ChonkieChunker(tokenizer_name=self.tokenizer_name)
+
+        return self._chunker
+
     def chunk_by_token_count(self, text, chunk_size, include_context=False):
         # prepare results
-        chunks = self.chunker(data=Symbol(text), chunker_name=self.chunker_type, chunk_size=chunk_size)
+        chunker = self._get_chunker()
+        chunks = chunker(data=Symbol(text), chunker_name=self.chunker_type, chunk_size=chunk_size)
         return chunks
 
     async def summarize_chunks(self, chunks, **kwargs):
