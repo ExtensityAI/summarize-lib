@@ -1,4 +1,4 @@
-# Summarize ‑ Hierarchical document summarization for SymbolicAI
+# Summarize - Hierarchical document summarization for SymbolicAI
 
 `ExtensityAI/summarize-lib` is a SymbolicAI plug-in that turns **any long form content**
 — books, papers, interviews, reports, slide decks, … — into a structured JSON
@@ -9,40 +9,30 @@ object.
 
 This README explains
 
-* how to install the plug-in,
-* how to load it with SymbolicAI’s dynamic importer, and
+* how to install the library with `pip`,
+* how to import it directly in Python, and
 * how to configure the `HierarchicalSummary` class.
 
 ---
 
 ## Installation
 
-The plug-in is distributed through SymbolicAI’s package manager `sympkg`.
+Install directly from the git repository:
 
 ```bash
-# make sure symbolicai is available in the current (virtual-)environment
-pip install symbolicai   # or conda / poetry etc.
-
-# install the plug-in
-sympkg i ExtensityAI/summarize-lib
+pip install "git+<summarize-lib-repo-url>@v2"
 ```
 
-`sympkg` clones the repository into
-`<env>/.symai/packages/ExtensityAI/summarize-lib`, so nothing touches your
-global `site-packages`.
+This installs `summarize-lib` as a regular Python package. `v2` is the default
+entry point, and the implementation uses `ChonkieChunker` directly from
+`symbolicai`; there is no separate `chonkie-symai` dependency in this repo.
 
 ---
 
 ## Quick start
 
 ```python
-from symai.extended import Import
-
-# Load the class dynamically (no classical `pip install` needed)
-HierarchicalSummary = Import.load_expression(
-    "ExtensityAI/summarize-lib",
-    "HierarchicalSummary",
-)
+from summarize_lib import HierarchicalSummary
 
 # Either pass a path / http(s) link …
 summarizer = HierarchicalSummary(
@@ -65,6 +55,11 @@ print(result.quotes)   # → list[str] | None
 The returned object is a `pydantic` `LLMDataModel`; you can therefore treat it
 like any other data-class and call `result.model_dump()` to obtain the raw
 Python dictionary.
+
+## SymbolicAI plug-in entry point
+
+If you still load the repo through SymbolicAI's plug-in manifest, the default
+`HierarchicalSummary` expression now points to `src/hierarchical_v2.py`.
 
 ---
 

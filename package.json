@@ -1,10 +1,10 @@
 {
-    "version": "1.5.0",
+    "version": "2.0.0",
     "name": "ExtensityAI/summarize-lib",
     "description": "Summarize long texts and documents.",
     "expressions": [
         {
-            "module": "src/hierarchical",
+            "module": "src/hierarchical_v2",
             "type": "HierarchicalSummary"
         },
         {
@@ -12,5 +12,5 @@
             "type": "DocumentType"
         }
     ],
-    "dependencies": ["ExtensityAI/chonkie-symai"]
+    "dependencies": []
 }

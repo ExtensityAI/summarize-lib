@@ -1,3 +1,8 @@
+symbolicai>=1.10.0
 pydantic
 nest_asyncio
 tenacity
+loguru
+numpy
+tiktoken
+tokenizers
