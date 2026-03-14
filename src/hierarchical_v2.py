@@ -8,6 +8,7 @@ chunking mode, and usage/telemetry tracking).
 import asyncio
 import contextvars
 import hashlib
+import inspect
 import json
 import math
 import os
@@ -50,6 +51,34 @@ from .hierarchical_v2_reduce import (
 from .memoization import get_memoization_manager
 from .types import TYPE_SPECIFIC_PROMPTS, DocumentType
 
+
+class AssetMetadata(LLMDataModel):
+    document_type: Optional[str] = Field(
+        default=None,
+        description="Best-effort detected document/content type for the asset.",
+    )
+    title: Optional[str] = Field(
+        default=None,
+        description="Best-effort asset title when the source exposes one.",
+    )
+    authors: Optional[List[str]] = Field(
+        default=None,
+        description="Best-effort author list for authored documents when available.",
+    )
+    speakers: Optional[List[str]] = Field(
+        default=None,
+        description="Best-effort speaker list for interview/talk/podcast-like assets when available.",
+    )
+    publisher_or_collection: Optional[str] = Field(
+        default=None,
+        description="Best-effort publisher, outlet, or source collection when available.",
+    )
+    publication_year: Optional[str] = Field(
+        default=None,
+        description="Best-effort publication year when available.",
+    )
+
+
 class Summary(LLMDataModel):
     summary: str = Field(
         description="An extremely comprehensive summary of the document. Do not start with 'This document is about...' or similar phrases."
@@ -60,6 +89,13 @@ class Summary(LLMDataModel):
     quotes: Optional[List[str]] = Field(
         default=None,
         description="Significant quotes extracted from the document verbatim if there are any.",
+    )
+    asset_metadata: Optional[AssetMetadata] = Field(
+        default=None,
+        description=(
+            "Optional asset-level metadata such as detected document type, title, authors, speakers, "
+            "publisher/collection, and publication year."
+        ),
     )
     type: Optional[str] = None
 
@@ -359,6 +395,7 @@ class HierarchicalSummaryV2(ValidatedFunction):
                 "enabled": False,
                 "requests": 0,
                 "items": 0,
+                "dropped_items": 0,
                 "input_tokens": 0,
                 "vector_dimensions": 0,
                 "seconds": 0.0,
@@ -612,6 +649,7 @@ class HierarchicalSummaryV2(ValidatedFunction):
             {self.user_prompt}
             </purpose>"""
             )
+        asset_metadata_prompt = self._asset_metadata_prompt_guidance()
 
         prompt_text = dedent(
             f"""
@@ -625,6 +663,7 @@ class HierarchicalSummaryV2(ValidatedFunction):
 
             {type_specific_prompt}
             {profile_specific_prompt}
+            {asset_metadata_prompt}
 
             {user_prompt}
 
@@ -807,6 +846,20 @@ class HierarchicalSummaryV2(ValidatedFunction):
     def _refresh_doc_profile_usage(self) -> None:
         self._usage["chunking"]["profile_name"] = self._active_doc_profile().name
 
+    def _asset_metadata_prompt_guidance(self) -> str:
+        if "asset_metadata" not in self.data_model.model_fields:
+            return ""
+        return dedent(
+            """
+            [Asset Metadata Guidance]
+            - If the schema includes `asset_metadata`, populate it with only source-supported document-level metadata.
+            - Always set `asset_metadata.document_type` when the detected content type is clear.
+            - For article/report/scientific paper/review/wiki/book content, prioritize title, authors, publisher_or_collection, and publication_year.
+            - For interview/podcast/talk/keynote/presentation content, prioritize speakers and keep speaker-specific claims separated in facts/quotes.
+            - Leave unknown metadata fields null instead of inventing values.
+            """
+        )
+
     def _pre_chunk_type_detection_input(self, max_chars: int = 12000) -> str:
         text = (self.content_only if self.content_only else self.content) or ""
         text = str(text).strip()
@@ -896,16 +949,36 @@ class HierarchicalSummaryV2(ValidatedFunction):
     def _embedding_item_token_limit(self) -> int:
         """Conservative per-item token limit for embedding requests.
 
-        Keeps a safety margin below common provider hard limits (e.g. 8192).
+        Some providers still reject tokenized embedding inputs beyond ~2048
+        tokens even when model-level limits are higher, so keep a clear buffer.
         """
-        return 6000
+        return 1800
+
+    def _embedding_batch_token_limit(self) -> int:
+        """Conservative total token budget per embedding request."""
+        return 12000
+
+    def _embedding_batch_item_limit(self) -> int:
+        """Conservative item cap per embedding request."""
+        return 16
+
+    def _sanitize_embedding_text(self, text: Any) -> str:
+        raw = str(text or "")
+        if not raw:
+            return ""
+        cleaned = raw.replace("\x00", " ")
+        cleaned = "".join(
+            ch if (ch >= " " or ch in "\n\r\t") else " " for ch in cleaned
+        )
+        cleaned = re.sub(r"\s+", " ", cleaned).strip()
+        return cleaned
 
     def _split_text_for_embedding(self, text: str, token_limit: int) -> List[str]:
         text = (text or "").strip()
         if not text:
             return []
 
-        if self._estimate_tokens_near_threshold(text, threshold=token_limit) <= token_limit:
+        if self._estimate_tokens_quiet(text) <= token_limit:
             return [text]
 
         split_target = max(700, min(2200, int(token_limit * 0.55)))
@@ -938,7 +1011,7 @@ class HierarchicalSummaryV2(ValidatedFunction):
         # Ensure every part fits the embedding token limit.
         safe_parts: List[str] = []
         for part in parts:
-            if self._estimate_tokens_near_threshold(part, threshold=token_limit) <= token_limit:
+            if self._estimate_tokens_quiet(part) <= token_limit:
                 safe_parts.append(part)
                 continue
 
@@ -951,7 +1024,7 @@ class HierarchicalSummaryV2(ValidatedFunction):
             current: List[str] = []
             current_tokens = 0
             for sentence in sentences:
-                st = self._estimate_tokens_near_threshold(sentence, threshold=token_limit)
+                st = self._estimate_tokens_quiet(sentence)
                 if current and current_tokens + st > token_limit:
                     safe_parts.append(" ".join(current).strip())
                     current = [sentence]
@@ -973,7 +1046,10 @@ class HierarchicalSummaryV2(ValidatedFunction):
         expanded_count = 0
 
         for segment in segments:
-            tokens = self._estimate_tokens_near_threshold(segment, threshold=token_limit)
+            segment = self._sanitize_embedding_text(segment)
+            if not segment:
+                continue
+            tokens = self._estimate_tokens_quiet(segment)
             if tokens <= token_limit:
                 expanded.append(segment)
                 continue
@@ -983,11 +1059,11 @@ class HierarchicalSummaryV2(ValidatedFunction):
                 expanded.append(segment)
                 continue
 
-            expanded.extend(parts)
+            expanded.extend(self._sanitize_embedding_text(part) for part in parts)
             expanded_count += max(0, len(parts) - 1)
 
         self._usage["chunking"]["semantic_segments_expanded"] = expanded_count
-        return expanded
+        return [segment for segment in expanded if segment]
 
     def _normalize_embedding_vector(self, emb: Any) -> List[float]:
         # Some providers return [D], others [[D]].
@@ -999,35 +1075,162 @@ class HierarchicalSummaryV2(ValidatedFunction):
             emb = list(emb)
         return [float(x) for x in emb]
 
+    def _is_embedding_input_too_long_error(self, exc: Exception) -> bool:
+        message = str(exc).lower()
+        return any(
+            marker in message
+            for marker in (
+                "array length must be 2048 or less",
+                "maximum context length",
+                "context length exceeded",
+                "too many tokens",
+                "input is too long",
+            )
+        )
+
+    def _average_embedding_vectors(self, vectors: List[List[float]]) -> List[float]:
+        if not vectors:
+            raise ValueError("Cannot average empty embedding vector list.")
+
+        dims = len(vectors[0])
+        if dims == 0:
+            return []
+
+        total = [0.0] * dims
+        for vector in vectors:
+            if len(vector) != dims:
+                raise ValueError("Embedding vectors must have consistent dimensions.")
+            for i, value in enumerate(vector):
+                total[i] += float(value)
+
+        averaged = [value / len(vectors) for value in total]
+        norm = math.sqrt(sum(value * value for value in averaged))
+        if norm > 1e-12:
+            averaged = [value / norm for value in averaged]
+        return averaged
+
+    def _embed_oversize_text_with_aggregation(self, text: str) -> List[float]:
+        split_limit = self._embedding_item_token_limit()
+        parts = [
+            self._sanitize_embedding_text(part)
+            for part in self._split_text_for_embedding(text, token_limit=split_limit)
+        ]
+        parts = [part for part in parts if part]
+        if len(parts) <= 1:
+            raise ValueError("Unable to split oversized embedding input into smaller parts.")
+
+        logger.debug(f"Retrying oversized embedding input by splitting into {len(parts)} parts.")
+
+        vectors: List[List[float]] = []
+        for batch in self._iter_embedding_batches(parts):
+            vectors.extend(self._embed_symbolicai_batch(batch))
+
+        if len(vectors) != len(parts):
+            raise ValueError(
+                f"Embedding response size mismatch while aggregating oversized input: "
+                f"expected {len(parts)} vectors, got {len(vectors)}."
+            )
+
+        return self._average_embedding_vectors(vectors)
+
+    def _iter_embedding_batches(self, texts: List[str]) -> List[List[str]]:
+        batches: List[List[str]] = []
+        batch: List[str] = []
+        batch_tokens = 0
+        max_batch_tokens = self._embedding_batch_token_limit()
+        max_batch_items = self._embedding_batch_item_limit()
+
+        for text in texts:
+            text_tokens = self._estimate_tokens_approx(text)
+            should_flush = (
+                batch
+                and (
+                    len(batch) >= max_batch_items
+                    or batch_tokens + text_tokens > max_batch_tokens
+                )
+            )
+            if should_flush:
+                batches.append(batch)
+                batch = []
+                batch_tokens = 0
+            batch.append(text)
+            batch_tokens += text_tokens
+
+        if batch:
+            batches.append(batch)
+
+        return batches
+
+    def _call_embedding_batch(self, texts: List[str]) -> List[List[float]]:
+        emb_stats = self._usage["embedding"]
+        emb_stats["requests"] += 1
+        emb_start = time.perf_counter()
+        try:
+            result = Symbol(texts).embed()
+            values = result.value if hasattr(result, "value") else result
+            vectors = [self._normalize_embedding_vector(v) for v in values]
+            elapsed = time.perf_counter() - emb_start
+            emb_stats["seconds"] += elapsed
+            emb_stats["vector_dimensions"] = len(vectors[0]) if vectors else 0
+            return vectors
+        except Exception:
+            elapsed = time.perf_counter() - emb_start
+            emb_stats["failed_requests"] += 1
+            emb_stats["seconds"] += elapsed
+            raise
+
+    def _embed_symbolicai_batch(self, texts: List[str]) -> List[List[float]]:
+        try:
+            vectors = self._call_embedding_batch(texts)
+        except Exception as exc:
+            if len(texts) == 1 and self._is_embedding_input_too_long_error(exc):
+                return [self._embed_oversize_text_with_aggregation(texts[0])]
+            if len(texts) <= 1:
+                raise
+            midpoint = len(texts) // 2
+            if midpoint <= 0:
+                raise
+            return self._embed_symbolicai_batch(texts[:midpoint]) + self._embed_symbolicai_batch(
+                texts[midpoint:]
+            )
+
+        if len(vectors) != len(texts):
+            raise ValueError(
+                f"Embedding response size mismatch: expected {len(texts)} vectors, got {len(vectors)}."
+            )
+        return vectors
+
     def _embed_text_batch(self, texts: List[str]) -> Optional[List[List[float]]]:
         if not texts:
             return []
 
         self._usage["embedding"]["enabled"] = True
         emb_stats = self._usage["embedding"]
-        emb_stats["requests"] += 1
-        emb_stats["items"] += len(texts)
-        emb_stats["input_tokens"] += sum(self._estimate_tokens_approx(t) for t in texts)
-        emb_start = time.perf_counter()
-        try:
-            # SymbolicAI-native embedding call (batched).
-            result = Symbol(texts).embed()
-            values = result.value if hasattr(result, "value") else result
-            vectors = [self._normalize_embedding_vector(v) for v in values]
+        sanitized_texts = [self._sanitize_embedding_text(text) for text in texts]
+        dropped_items = sum(1 for text in sanitized_texts if not text)
+        if dropped_items:
+            emb_stats["dropped_items"] += dropped_items
+        sanitized_texts = [text for text in sanitized_texts if text]
+        if not sanitized_texts:
+            return []
 
-            elapsed = time.perf_counter() - emb_start
-            emb_stats["seconds"] += elapsed
+        emb_stats["items"] += len(sanitized_texts)
+        emb_stats["input_tokens"] += sum(
+            self._estimate_tokens_approx(text) for text in sanitized_texts
+        )
+
+        try:
+            vectors: List[List[float]] = []
+            for batch in self._iter_embedding_batches(sanitized_texts):
+                vectors.extend(self._embed_symbolicai_batch(batch))
             emb_stats["vector_dimensions"] = len(vectors[0]) if vectors else 0
             logger.info(
                 f"[summarize-usage] embeddings requests={emb_stats['requests']} "
-                f"items={len(texts)} dims={emb_stats['vector_dimensions']} seconds={elapsed:.3f}"
+                f"items={len(sanitized_texts)} dims={emb_stats['vector_dimensions']} "
+                f"seconds={emb_stats['seconds']:.3f}"
             )
             return vectors
         except Exception as e:
-            elapsed = time.perf_counter() - emb_start
-            emb_stats = self._usage["embedding"]
-            emb_stats["failed_requests"] += 1
-            emb_stats["seconds"] += elapsed
             logger.warning(f"Semantic embedding failed, falling back to structural chunking: {e}")
             return None
 
@@ -1543,6 +1746,25 @@ class HierarchicalSummaryV2(ValidatedFunction):
             return False
         return self._unwrap_annotation(args[0]) is str
 
+    def _list_item_annotation(self, annotation: Any) -> Any:
+        ann = self._unwrap_annotation(annotation)
+        origin = get_origin(ann)
+        if origin not in (list, List):
+            return Any
+        args = get_args(ann)
+        if not args:
+            return Any
+        return self._unwrap_annotation(args[0])
+
+    def _annotation_is_structured_model(self, annotation: Any) -> bool:
+        ann = self._unwrap_annotation(annotation)
+        return inspect.isclass(ann) and issubclass(ann, LLMDataModel)
+
+    def _annotation_is_list_of_structured_models(self, annotation: Any) -> bool:
+        if not self._annotation_is_list(annotation):
+            return False
+        return self._annotation_is_structured_model(self._list_item_annotation(annotation))
+
     def _default_value_for_field(self, field_info) -> Any:
         if field_info.default is not PydanticUndefined:
             return field_info.default
@@ -1791,6 +2013,104 @@ class HierarchicalSummaryV2(ValidatedFunction):
             value=(annotation, Field(description=description or f"Merged value for field '{field_name}'")),
         )
 
+    def _merge_prompt_with_schema(self, base_prompt: str, model: type[LLMDataModel]) -> str:
+        return dedent(
+            f"""
+            {base_prompt.strip()}
+
+            Exact target schema:
+            {model.instruct_llm()}
+
+            Additional schema rules:
+            - Use exactly the field names shown in the schema.
+            - Do not rename keys or invent synonyms.
+            - Preserve nested object structure exactly as defined.
+            - If a nested value is unavailable, use `null` only where the schema allows it.
+            - For list outputs, every item must conform to the item schema exactly.
+            """
+        ).strip()
+
+    def _structured_item_priority(self, item: Any) -> Tuple[float, int, int]:
+        payload = _safe_jsonable(item)
+        if isinstance(payload, dict):
+            confidence = payload.get("confidence")
+            try:
+                confidence_score = float(confidence) if confidence is not None else -1.0
+            except (TypeError, ValueError):
+                confidence_score = -1.0
+
+            populated_fields = 0
+            for value in payload.values():
+                if isinstance(value, dict):
+                    populated_fields += sum(
+                        1 for nested in value.values() if nested not in (None, "", [], {})
+                    )
+                elif value not in (None, "", [], {}):
+                    populated_fields += 1
+
+            primary_text = ""
+            for key in ("fact", "quote", "text", "summary", "title", "name"):
+                candidate = payload.get(key)
+                if isinstance(candidate, str) and candidate.strip():
+                    primary_text = candidate.strip()
+                    break
+            return confidence_score, populated_fields, min(len(primary_text), 240)
+
+        text = str(payload).strip()
+        return -1.0, 0, min(len(text), 240)
+
+    def _merge_structured_list_field(
+        self,
+        *,
+        field_name: str,
+        items: List[Any],
+        flattened: List[Any],
+        target_tokens: int,
+    ) -> List[Any]:
+        if not items:
+            return []
+
+        if not self._has_output_limit():
+            return items
+
+        frequencies = Counter(
+            json.dumps(_safe_jsonable(item), sort_keys=True, ensure_ascii=False)
+            for item in flattened
+        )
+        unique_keys = [
+            json.dumps(_safe_jsonable(item), sort_keys=True, ensure_ascii=False)
+            for item in items
+        ]
+        order = {key: idx for idx, key in enumerate(unique_keys)}
+
+        ranked_keys = sorted(
+            unique_keys,
+            key=lambda key: (
+                -frequencies[key],
+                -self._structured_item_priority(items[order[key]])[0],
+                -self._structured_item_priority(items[order[key]])[1],
+                -self._structured_item_priority(items[order[key]])[2],
+                order[key],
+            ),
+        )
+
+        selected_keys = set()
+        running = 0
+        keep_min = min(self._detail_list_min_items(field_name), len(items))
+
+        for key in ranked_keys:
+            item = items[order[key]]
+            item_tokens = self._estimate_tokens_approx(_safe_jsonable(item))
+            if len(selected_keys) >= keep_min and selected_keys and running + item_tokens > target_tokens:
+                continue
+            selected_keys.add(key)
+            running += item_tokens
+
+        if not selected_keys:
+            selected_keys.add(ranked_keys[0])
+
+        return [item for item, key in zip(items, unique_keys) if key in selected_keys]
+
     def _llm_merge_string_batch(
         self,
         *,
@@ -1880,7 +2200,8 @@ class HierarchicalSummaryV2(ValidatedFunction):
             description=field_description or f"Merged value for {field_name}",
         )
 
-        prompt = dedent(
+        prompt = self._merge_prompt_with_schema(
+            dedent(
             f"""
             Merge multiple candidate values for one schema field.
 
@@ -1895,6 +2216,8 @@ class HierarchicalSummaryV2(ValidatedFunction):
             - Respect the target type and schema constraints.
             - Keep the value concise enough for ~{max(64, target_tokens)} tokens.
             """
+            ),
+            model,
         )
 
         fn = ValidatedFunction(
@@ -2101,6 +2424,14 @@ class HierarchicalSummaryV2(ValidatedFunction):
         )
         if joined_tokens <= int(target_tokens * 1.1):
             return unique
+
+        if self._annotation_is_list_of_structured_models(annotation):
+            return self._merge_structured_list_field(
+                field_name=field_name,
+                items=unique,
+                flattened=flattened,
+                target_tokens=target_tokens,
+            )
 
         merged = self._llm_merge_generic_field(
             field_name=field_name,

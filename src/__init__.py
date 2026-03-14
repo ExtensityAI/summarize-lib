@@ -1,4 +1,5 @@
 from .hierarchical_v2 import (
+    AssetMetadata,
     HierarchicalSummary,
     HierarchicalSummaryV2,
     Summary,
@@ -8,6 +9,7 @@ from .hierarchical_v2 import (
 from .types import DocumentType
 
 __all__ = [
+    "AssetMetadata",
     "DocumentType",
     "HierarchicalSummary",
     "HierarchicalSummaryV2",
