@@ -20,7 +20,7 @@ from collections import Counter, OrderedDict, defaultdict
 from contextlib import contextmanager
 from dataclasses import dataclass
 from textwrap import dedent
-from typing import Any, Dict, List, Optional, Tuple, Union, get_args, get_origin
+from typing import Any, Collection, Dict, List, Optional, Tuple, Union, get_args, get_origin
 
 import nest_asyncio
 from loguru import logger
@@ -77,6 +77,13 @@ class AssetMetadata(LLMDataModel):
         default=None,
         description="Best-effort publication year when available.",
     )
+
+    @field_validator("publication_year", mode="before")
+    @classmethod
+    def coerce_year_to_str(cls, v):
+        if isinstance(v, (int, float)):
+            return str(int(v))
+        return v
 
 
 class Summary(LLMDataModel):
@@ -322,6 +329,7 @@ class HierarchicalSummaryV2(ValidatedFunction):
         enable_initial_compression: bool = True,
         plain_text_only: bool = False,
         engine: Optional[object] = None,
+        document_level_fields: Collection[str] | None = None,
         *args,
         **kwargs,
     ):
@@ -347,6 +355,9 @@ class HierarchicalSummaryV2(ValidatedFunction):
         self.enable_initial_compression = enable_initial_compression
         self.plain_text_only = plain_text_only
         self.engine = engine
+        self.document_level_fields = self._normalize_document_level_fields(document_level_fields)
+        self._chunk_data_model = self._derive_chunk_data_model()
+        self._document_level_data_model = self._derive_document_level_data_model()
 
         # Token accounting metrics used by debug scripts.
         self._token_offset = 0
@@ -405,6 +416,7 @@ class HierarchicalSummaryV2(ValidatedFunction):
                 "calls_total": 0,
                 "calls_by_stage": {
                     "map": 0,
+                    "document_level": 0,
                     "merge": 0,
                     "type_detection": 0,
                     "language_detection": 0,
@@ -621,8 +633,7 @@ class HierarchicalSummaryV2(ValidatedFunction):
         os.remove(tmp_file_name)
         return content, file_name
 
-    @property
-    def prompt(self) -> str:
+    def _prompt_for_schema(self, schema: type[LLMDataModel]) -> str:
         type_specific_prompt = ""
         if self.document_type and self.document_type in TYPE_SPECIFIC_PROMPTS:
             type_specific_prompt = dedent(
@@ -649,7 +660,7 @@ class HierarchicalSummaryV2(ValidatedFunction):
             {self.user_prompt}
             </purpose>"""
             )
-        asset_metadata_prompt = self._asset_metadata_prompt_guidance()
+        asset_metadata_prompt = self._asset_metadata_prompt_guidance(schema)
 
         prompt_text = dedent(
             f"""
@@ -684,8 +695,12 @@ class HierarchicalSummaryV2(ValidatedFunction):
             - For interview-like content, retain speaker-specific claims and framing rather than collapsing to generic prose.
         """
         )
-        prompt_text += self.data_model.instruct_llm()
+        prompt_text += schema.instruct_llm()
         return prompt_text
+
+    @property
+    def prompt(self) -> str:
+        return self._prompt_for_schema(self._map_data_model())
 
     @property
     def static_context(self) -> str:
@@ -846,8 +861,76 @@ class HierarchicalSummaryV2(ValidatedFunction):
     def _refresh_doc_profile_usage(self) -> None:
         self._usage["chunking"]["profile_name"] = self._active_doc_profile().name
 
-    def _asset_metadata_prompt_guidance(self) -> str:
-        if "asset_metadata" not in self.data_model.model_fields:
+    def _normalize_document_level_fields(
+        self, document_level_fields: Collection[str] | None
+    ) -> tuple[str, ...]:
+        if not document_level_fields:
+            return ()
+
+        requested = tuple(dict.fromkeys(str(field) for field in document_level_fields))
+        available = {
+            name
+            for name, field in self.data_model.model_fields.items()
+            if not getattr(field, "exclude", False)
+        }
+        unknown = sorted(set(requested) - available)
+        if unknown:
+            raise ValueError(
+                f"Unknown document_level_fields for {self.data_model.__name__}: {', '.join(unknown)}"
+            )
+        return requested
+
+    def _derive_subset_model(
+        self,
+        *,
+        include_fields: Collection[str] | None = None,
+        exclude_fields: Collection[str] | None = None,
+        model_name_suffix: str,
+    ) -> type[LLMDataModel]:
+        include_set = set(include_fields) if include_fields is not None else None
+        exclude_set = set(exclude_fields or ())
+        fields: Dict[str, tuple[Any, Any]] = {}
+
+        for field_name, field_info in self.data_model.model_fields.items():
+            if getattr(field_info, "exclude", False):
+                continue
+            if include_set is not None and field_name not in include_set:
+                continue
+            if field_name in exclude_set:
+                continue
+            fields[field_name] = (field_info.annotation, field_info)
+
+        model_name = f"{self.data_model.__name__}{model_name_suffix}"
+        return create_model(model_name, __base__=LLMDataModel, **fields)
+
+    def _derive_chunk_data_model(self) -> type[LLMDataModel]:
+        if not self.document_level_fields:
+            return self.data_model
+        return self._derive_subset_model(
+            exclude_fields=self.document_level_fields,
+            model_name_suffix="Chunk",
+        )
+
+    def _derive_document_level_data_model(self) -> type[LLMDataModel] | None:
+        if not self.document_level_fields:
+            return None
+        return self._derive_subset_model(
+            include_fields=self.document_level_fields,
+            model_name_suffix="DocumentLevel",
+        )
+
+    def _map_data_model(self) -> type[LLMDataModel]:
+        return self._chunk_data_model
+
+    def _document_data_model(self) -> type[LLMDataModel] | None:
+        return self._document_level_data_model
+
+    def _schema_contains_field(self, schema: type[LLMDataModel], field_name: str) -> bool:
+        field_info = schema.model_fields.get(field_name)
+        return field_info is not None and not getattr(field_info, "exclude", False)
+
+    def _asset_metadata_prompt_guidance(self, schema: type[LLMDataModel]) -> str:
+        if not self._schema_contains_field(schema, "asset_metadata"):
             return ""
         return dedent(
             """
@@ -882,12 +965,49 @@ class HierarchicalSummaryV2(ValidatedFunction):
 
     def _schema_list_field_count(self) -> int:
         count = 0
-        for field_info in self.data_model.model_fields.values():
+        for field_info in self._map_data_model().model_fields.values():
             if getattr(field_info, "exclude", False):
                 continue
             if self._annotation_is_list(field_info.annotation):
                 count += 1
         return count
+
+    def _make_extraction_function(
+        self, schema: type[LLMDataModel], *, prompt_text: str | None = None
+    ) -> ValidatedFunction:
+        resolved_prompt = prompt_text or self._prompt_for_schema(schema)
+        return ValidatedFunction(
+            data_model=schema,
+            retry_count=self.retry_count,
+            prompt=resolved_prompt,
+            static_context=self.static_context,
+            dynamic_context=self.dynamic_context,
+        )
+
+    def _merge_overlay(self, base: Dict[str, Any], overlay: Dict[str, Any]) -> Dict[str, Any]:
+        for key, value in overlay.items():
+            if value is None:
+                continue
+            if isinstance(value, dict) and isinstance(base.get(key), dict):
+                self._merge_overlay(base[key], value)
+            else:
+                base[key] = value
+        return base
+
+    def _extract_document_level_fields(self, payload: str) -> Dict[str, Any]:
+        schema = self._document_data_model()
+        if schema is None:
+            return {}
+
+        prompt_text = self._prompt_for_schema(schema)
+        fn = self._make_extraction_function(schema, prompt_text=prompt_text)
+        res = self._call_validated_function(
+            fn,
+            payload,
+            stage="document_level",
+            prompt_text=prompt_text,
+        )
+        return res.model_dump(mode="json", exclude_none=True)
 
     def _semantic_target_map_chunks(self, total_tokens: int, prompt_tokens: int) -> int:
         if not self._semantic_mode_enabled():
@@ -1439,6 +1559,9 @@ class HierarchicalSummaryV2(ValidatedFunction):
             return normalized
 
     async def summarize_chunks(self, chunks: List[str], **kwargs) -> Tuple[List[LLMDataModel], int]:
+        schema = self._map_data_model()
+        prompt_text = self._prompt_for_schema(schema)
+
         @retry(
             retry=retry_if_exception_type(Exception),
             wait=wait_exponential_jitter(initial=0.25, max=60),
@@ -1449,19 +1572,12 @@ class HierarchicalSummaryV2(ValidatedFunction):
             loop = asyncio.get_event_loop()
 
             def worker():
-                if self.engine is not None:
-                    with DynamicEngine(model=self.engine.model, api_key=self.engine.api_key):
-                        return super(HierarchicalSummaryV2, self).forward(
-                            chunk,
-                            preview=False,
-                            response_format={"type": "json_object"},
-                            **kwargs,
-                        )
-                return super(HierarchicalSummaryV2, self).forward(
+                fn = self._make_extraction_function(schema, prompt_text=prompt_text)
+                return self._call_validated_function(
+                    fn,
                     chunk,
-                    preview=False,
-                    response_format={"type": "json_object"},
-                    **kwargs,
+                    stage="map",
+                    prompt_text=prompt_text,
                 )
 
             ctx = contextvars.copy_context()
@@ -1469,14 +1585,6 @@ class HierarchicalSummaryV2(ValidatedFunction):
 
         tasks = [summarize_chunk(chunk) for chunk in chunks]
         results = await asyncio.gather(*tasks)
-        for chunk, result in zip(chunks, results):
-            est_in = self._estimate_tokens_approx(chunk) + self._last_prompt_token_estimate
-            est_out = self._estimate_tokens_approx(getattr(result, "model_dump", lambda **_: result)(mode="json"))
-            self._record_llm_call(
-                "map",
-                estimated_input_tokens=est_in,
-                estimated_output_tokens=est_out,
-            )
         return results, len(results)
 
     def _augment_with_user_prompt(self, text: str) -> str:
@@ -1659,6 +1767,15 @@ class HierarchicalSummaryV2(ValidatedFunction):
             doc_lang = self.get_document_language(detection_chunk)
             self.adapt("[[DOCUMENT TYPE]]\n" + doc_type.value)
             self.adapt("[[DOCUMENT LANGUAGE]]\n" + doc_lang)
+            document_level_payload = self._pre_chunk_type_detection_input()
+            document_level_fields: Dict[str, Any] = {}
+
+            if self._document_data_model() is not None:
+                logger.debug("Extracting document-level fields...")
+                with self._track_step("document_level_stage"):
+                    document_level_fields = self._extract_document_level_fields(
+                        document_level_payload
+                    )
 
             nest_asyncio.apply()
             loop = always_get_an_event_loop()
@@ -1670,6 +1787,8 @@ class HierarchicalSummaryV2(ValidatedFunction):
             logger.debug("Merging chunk outputs by field (reduce stage)...")
             with self._track_step("reduce_stage"):
                 merged = self._merge_fields(chunk_results, language=doc_lang)
+                if document_level_fields:
+                    merged = self._merge_overlay(merged, document_level_fields)
                 res = self.data_model(**merged)
 
             token_count = self.compute_required_tokens_graceful(res, count_context=False) or 0

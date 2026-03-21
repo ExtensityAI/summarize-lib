@@ -3,6 +3,7 @@ import tempfile
 from pathlib import Path
 from typing import List, Optional
 
+import pytest
 from pydantic import Field
 from symai.components import ChonkieChunker
 from symai.models import LLMDataModel
@@ -608,6 +609,151 @@ def test_prompt_includes_asset_metadata_guidance_for_interview() -> None:
     assert "[Asset Metadata Guidance]" in prompt
     assert "prioritize speakers and keep speaker-specific claims separated" in prompt
     assert "Identify and distinguish between different speakers." in prompt
+
+
+def test_document_level_fields_derive_chunk_and_document_models() -> None:
+    s = HierarchicalSummaryV2(
+        content="Interview transcript",
+        document_name="interview.txt",
+        data_model=RichSchema,
+        document_level_fields={"asset_metadata"},
+        min_num_chunks=2,
+        min_chunk_size=64,
+        max_chunk_size=256,
+        max_output_tokens=None,
+        user_prompt="extract useful material",
+        include_quotes=False,
+        tokenizer_name="gpt2",
+        chunker_name="SemanticHybridChunker",
+    )
+
+    chunk_model = s._map_data_model()
+    document_model = s._document_data_model()
+
+    assert "asset_metadata" not in chunk_model.model_fields
+    assert document_model is not None
+    assert {
+        name
+        for name, field in document_model.model_fields.items()
+        if not getattr(field, "exclude", False)
+    } == {"asset_metadata"}
+
+
+def test_document_level_fields_fail_fast_for_unknown_fields() -> None:
+    with pytest.raises(ValueError, match="Unknown document_level_fields"):
+        HierarchicalSummaryV2(
+            content="Interview transcript",
+            document_name="interview.txt",
+            data_model=RichSchema,
+            document_level_fields={"missing_field"},
+            min_num_chunks=2,
+            min_chunk_size=64,
+            max_chunk_size=256,
+            max_output_tokens=None,
+            user_prompt="extract useful material",
+            include_quotes=False,
+            tokenizer_name="gpt2",
+            chunker_name="SemanticHybridChunker",
+        )
+
+
+def test_split_schema_uses_metadata_guidance_only_for_document_level_prompt() -> None:
+    s = HierarchicalSummaryV2(
+        content="Interview transcript",
+        document_name="interview.txt",
+        data_model=RichSchema,
+        document_level_fields={"asset_metadata"},
+        min_num_chunks=2,
+        min_chunk_size=64,
+        max_chunk_size=256,
+        max_output_tokens=None,
+        user_prompt="extract useful material",
+        include_quotes=False,
+        tokenizer_name="gpt2",
+        chunker_name="SemanticHybridChunker",
+    )
+    s.document_type = DocumentType.INTERVIEW
+
+    chunk_prompt = s.prompt
+    document_prompt = s._prompt_for_schema(s._document_data_model())
+
+    assert "[Asset Metadata Guidance]" not in chunk_prompt
+    assert '"asset_metadata"' not in chunk_prompt
+    assert "[Asset Metadata Guidance]" in document_prompt
+    assert '"asset_metadata"' in document_prompt
+
+
+def test_document_level_fields_overlay_into_final_output(monkeypatch) -> None:
+    s = HierarchicalSummaryV2(
+        content="alpha paragraph\n\nsecond paragraph\n\nthird paragraph",
+        document_name="rich.txt",
+        data_model=RichSchema,
+        document_level_fields={"asset_metadata"},
+        min_num_chunks=2,
+        min_chunk_size=64,
+        max_chunk_size=256,
+        max_output_tokens=None,
+        user_prompt="extract useful material",
+        include_quotes=False,
+        tokenizer_name="gpt2",
+        chunker_name="SemanticHybridChunker",
+    )
+
+    def fake_get_document_type(_content: str):
+        s.document_type = DocumentType.INTERVIEW
+        return s.document_type
+
+    async def fake_summarize_chunks(chunks, **kwargs):
+        chunk_model = s._map_data_model()
+        return (
+            [
+                chunk_model(
+                    summary="Chunk summary",
+                    facts=[
+                        NestedFact(
+                            fact="Structured fact",
+                            provenance=NestedProvenance(location_hint="Section A"),
+                            attribution=NestedAttribution(work_or_publication="Source A"),
+                            confidence=0.8,
+                        )
+                    ],
+                )
+                for _ in chunks
+            ],
+            len(chunks),
+        )
+
+    monkeypatch.setattr(s, "compute_required_tokens_graceful", lambda *_args, **_kwargs: 120)
+    monkeypatch.setattr(s, "calculate_chunk_size", lambda _total_tokens: 128)
+    monkeypatch.setattr(s, "chunk_by_token_count", lambda _text, _chunk_size: ["chunk one", "chunk two"])
+    monkeypatch.setattr(s, "_filter_non_substantive_chunks", lambda chunks: chunks)
+    monkeypatch.setattr(s, "_select_detection_chunk", lambda chunks: chunks[0])
+    monkeypatch.setattr(s, "get_document_type", fake_get_document_type)
+    monkeypatch.setattr(s, "get_document_language", lambda _content: "English")
+    monkeypatch.setattr(s, "summarize_chunks", fake_summarize_chunks)
+    monkeypatch.setattr(
+        s,
+        "_extract_document_level_fields",
+        lambda _payload: {
+            "asset_metadata": {
+                "document_type": "interview",
+                "title": "Listening Interview",
+                "authors": ["Editor A"],
+                "speakers": ["Speaker A", "Speaker B"],
+                "publisher_or_collection": "Interview Series",
+                "publication_year": "2024",
+            }
+        },
+    )
+
+    result = s._forward_with_engine()
+
+    assert isinstance(result, RichSchema)
+    assert result.summary == "Chunk summary"
+    assert len(result.facts) == 1
+    assert result.asset_metadata is not None
+    assert result.asset_metadata.document_type == "interview"
+    assert result.asset_metadata.title == "Listening Interview"
 
 
 def test_asset_metadata_survives_budget_enforcement(monkeypatch) -> None:
