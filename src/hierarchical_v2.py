@@ -330,6 +330,7 @@ class HierarchicalSummaryV2(ValidatedFunction):
         plain_text_only: bool = False,
         engine: Optional[object] = None,
         document_level_fields: Collection[str] | None = None,
+        field_guidance: Optional[str] = None,
         *args,
         **kwargs,
     ):
@@ -355,6 +356,7 @@ class HierarchicalSummaryV2(ValidatedFunction):
         self.enable_initial_compression = enable_initial_compression
         self.plain_text_only = plain_text_only
         self.engine = engine
+        self.field_guidance = field_guidance
         self.document_level_fields = self._normalize_document_level_fields(document_level_fields)
         self._chunk_data_model = self._derive_chunk_data_model()
         self._document_level_data_model = self._derive_document_level_data_model()
@@ -662,6 +664,13 @@ class HierarchicalSummaryV2(ValidatedFunction):
             )
         asset_metadata_prompt = self._asset_metadata_prompt_guidance(schema)
 
+        field_guidance_prompt = ""
+        if self.field_guidance:
+            field_guidance_prompt = dedent(
+                f"""[Schema Field Guidance]
+            {self.field_guidance}"""
+            )
+
         prompt_text = dedent(
             f"""
             [[Document Processing Task]]
@@ -678,13 +687,15 @@ class HierarchicalSummaryV2(ValidatedFunction):
 
             {user_prompt}
 
+            {field_guidance_prompt}
+
             [Language Requirements]
             The output must be in the language specified in [[CONTENT LANGUAGE]], regardless of source language.
 
             [Key Requirements]
             - Capture all salient information relevant to the schema field descriptions.
             - Prefer high recall over abstraction at chunk level; do not prematurely compress nuanced points.
-            - Keep field semantics distinct (facts vs anecdotes vs quotes etc.) according to schema.
+            - Keep field semantics distinct according to schema.
             - Preserve factual consistency between fields.
             - For quote-like fields, keep quotations verbatim whenever possible.
             - Keep atomic details explicit:
@@ -1959,6 +1970,14 @@ class HierarchicalSummaryV2(ValidatedFunction):
                 return
 
     def _detail_list_min_items(self, field_name: str) -> int:
+        # Prefer min_items from Pydantic Field json_schema_extra metadata
+        field_info = self.data_model.model_fields.get(field_name)
+        if field_info is not None:
+            extra = getattr(field_info, "json_schema_extra", None) or {}
+            if isinstance(extra, dict) and "min_items" in extra:
+                return int(extra["min_items"])
+
+        # Fallback to hardcoded defaults for schemas without metadata
         name = field_name.lower()
         if "fact" in name:
             return 8
@@ -2011,22 +2030,32 @@ class HierarchicalSummaryV2(ValidatedFunction):
             ann = self._unwrap_annotation(field_info.annotation)
             weight = 1.0
 
+            # Check for explicit budget_weight in Pydantic Field json_schema_extra
+            extra = getattr(field_info, "json_schema_extra", None) or {}
+            explicit_weight = extra.get("budget_weight") if isinstance(extra, dict) else None
+
             if ann is str:
                 weight = 1.1
                 if self._is_summary_like_field(field_name):
                     # Keep summary concise so list fields can retain more details.
                     weight = 0.95
                     summary_like_fields.append(field_name)
-            elif self._annotation_is_list_of_str(field_info.annotation):
-                weight = 2.4
-                list_like_fields.append(field_name)
-                lname = field_name.lower()
-                if any(k in lname for k in ("fact", "insight", "event", "story", "anecdote", "case", "vocab", "exercise")):
-                    weight = 2.8
-                if "quote" in field_name.lower():
-                    weight = 2.1
-            elif self._annotation_is_list(field_info.annotation):
-                weight = 1.4
+            elif self._annotation_is_list_of_str(field_info.annotation) or self._annotation_is_list(field_info.annotation):
+                if self._annotation_is_list_of_str(field_info.annotation):
+                    weight = 2.4
+                    list_like_fields.append(field_name)
+                else:
+                    weight = 1.4
+
+                if explicit_weight is not None:
+                    weight = float(explicit_weight)
+                elif self._annotation_is_list_of_str(field_info.annotation):
+                    # Fallback to hardcoded name-based weights for schemas without metadata
+                    lname = field_name.lower()
+                    if any(k in lname for k in ("fact", "insight", "event", "story", "anecdote", "case", "vocab", "exercise")):
+                        weight = 2.8
+                    if "quote" in field_name.lower():
+                        weight = 2.1
 
             # Fields with more candidates usually need more space.
             candidate_count = max(1, len(merged_candidates.get(field_name, [])))
