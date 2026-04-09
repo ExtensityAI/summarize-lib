@@ -381,12 +381,18 @@ class HierarchicalSummaryV2(ValidatedFunction):
         self.content_only = str(file_content)
         self.content = f"[[DOCUMENT::{file_name}]]: <<<\n{self.content_only}\n>>>\n"
 
-        self.chunker = ChonkieChunker(tokenizer_name=self.tokenizer_name)
+        self._chunker: Optional[ChonkieChunker] = None
         self.chunker_type = chunker_name
 
         self.document_type = None
         self._usage["chunking"]["requested_strategy"] = self._requested_chunking_strategy()
         self._refresh_doc_profile_usage()
+
+    @property
+    def chunker(self) -> ChonkieChunker:
+        if self._chunker is None:
+            self._chunker = ChonkieChunker(tokenizer_name=self.tokenizer_name)
+        return self._chunker
 
     def _init_usage_tracking(self) -> Dict[str, Any]:
         return {
