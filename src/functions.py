@@ -9,6 +9,15 @@ from symai.components import Function
 from symai.models import LLMDataModel
 
 ############################################################################################################
+# Exceptions
+############################################################################################################
+
+
+class SchemaValidationError(Exception):
+    """Raised when ValidatedFunction exhausts all remedy attempts for JSON/schema validation."""
+
+
+############################################################################################################
 # ValidatedFunction
 ############################################################################################################
 
@@ -17,7 +26,7 @@ class ValidatedFunction(Function):
     def __init__(
         self,
         data_model: LLMDataModel = None,
-        retry_count=5,
+        retry_count=3,
         *args,
         **kwargs,
     ):
@@ -124,7 +133,7 @@ class ValidatedFunction(Function):
         for i in range(self.retry_count):
             try:
                 # try to validate against provided data model
-                result = self.data_model.model_validate_json(maybe_json, strict=True)
+                result = self.data_model.model_validate_json(maybe_json, strict=False)
                 break
             except ValidationError as e:
                 quote_repaired_json = self._try_repair_unescaped_inner_quotes(
@@ -202,7 +211,7 @@ class ValidatedFunction(Function):
                     result = None
 
         if result is None:
-            raise Exception(f"Failed to retrieve valid JSON: {last_error}")
+            raise SchemaValidationError(f"Failed to retrieve valid JSON: {last_error}")
 
         return result
 

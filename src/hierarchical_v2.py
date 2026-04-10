@@ -33,14 +33,14 @@ from symai.models import LLMDataModel
 from tenacity import (
     before_sleep_log,
     retry,
-    retry_if_exception_type,
+    retry_if_not_exception_type,
     stop_after_attempt,
     wait_exponential_jitter,
 )
 from tiktoken import Encoding
 from tokenizers import Tokenizer
 
-from .functions import ValidatedFunction
+from .functions import SchemaValidationError, ValidatedFunction
 from .hierarchical_v2_chunking import is_substantive_chunk, split_structural_segments
 from .hierarchical_v2_io import normalize_reader_content
 from .hierarchical_v2_reduce import (
@@ -341,7 +341,7 @@ class HierarchicalSummaryV2(ValidatedFunction):
             assert document_name is not None
         assert issubclass(data_model, LLMDataModel)
 
-        super().__init__(data_model=data_model, retry_count=5, *args, **kwargs)
+        super().__init__(data_model=data_model, retry_count=3, *args, **kwargs)
 
         self.document_lang = document_lang
         self.file_link = file_link
@@ -1581,9 +1581,9 @@ class HierarchicalSummaryV2(ValidatedFunction):
         prompt_text = self._prompt_for_schema(schema)
 
         @retry(
-            retry=retry_if_exception_type(Exception),
+            retry=retry_if_not_exception_type(SchemaValidationError),
             wait=wait_exponential_jitter(initial=0.25, max=60),
-            stop=stop_after_attempt(10),
+            stop=stop_after_attempt(5),
             before_sleep=before_sleep_log(logger, logger.level("INFO").no),
         )
         async def summarize_chunk(chunk: str, idx: int, total: int):
