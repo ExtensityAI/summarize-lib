@@ -459,6 +459,7 @@ class HierarchicalSummaryV2(ValidatedFunction):
 
     @contextmanager
     def _track_step(self, step_name: str):
+        logger.info(f"[summarize-usage] step={step_name} started")
         start = time.perf_counter()
         try:
             yield
@@ -1583,9 +1584,11 @@ class HierarchicalSummaryV2(ValidatedFunction):
             retry=retry_if_exception_type(Exception),
             wait=wait_exponential_jitter(initial=0.25, max=60),
             stop=stop_after_attempt(10),
-            before_sleep=before_sleep_log(logger, logger.level("DEBUG").no),
+            before_sleep=before_sleep_log(logger, logger.level("INFO").no),
         )
-        async def summarize_chunk(chunk: str):
+        async def summarize_chunk(chunk: str, idx: int, total: int):
+            logger.info(f"[summarize-progress] chunk {idx}/{total} started")
+            t0 = time.perf_counter()
             loop = asyncio.get_event_loop()
 
             def worker():
@@ -1598,9 +1601,12 @@ class HierarchicalSummaryV2(ValidatedFunction):
                 )
 
             ctx = contextvars.copy_context()
-            return await loop.run_in_executor(None, lambda: ctx.run(worker))
+            result = await loop.run_in_executor(None, lambda: ctx.run(worker))
+            elapsed = time.perf_counter() - t0
+            logger.info(f"[summarize-progress] chunk {idx}/{total} completed seconds={elapsed:.1f}")
+            return result
 
-        tasks = [summarize_chunk(chunk) for chunk in chunks]
+        tasks = [summarize_chunk(chunk, i + 1, len(chunks)) for i, chunk in enumerate(chunks)]
         results = await asyncio.gather(*tasks)
         return results, len(results)
 

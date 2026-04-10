@@ -161,9 +161,10 @@ class ValidatedFunction(Function):
                 # collect and format error messages
                 error_str = self.simplify_validation_errors(e)
 
-                logger.debug(
-                    f"[Retry {i + 1}/{self.retry_count}] ValidationError:\n{error_str}"
+                logger.info(
+                    f"[summarize-retry] attempt {i + 1}/{self.retry_count} ValidationError — calling remedy LLM"
                 )
+                logger.debug(f"Validation errors:\n{error_str}")
 
                 # adapt remedy function
                 remedy_function.clear()
