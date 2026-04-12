@@ -331,6 +331,7 @@ class HierarchicalSummaryV2(ValidatedFunction):
         engine: Optional[object] = None,
         document_level_fields: Collection[str] | None = None,
         field_guidance: Optional[str] = None,
+        max_workers: int = 8,
         *args,
         **kwargs,
     ):
@@ -357,6 +358,7 @@ class HierarchicalSummaryV2(ValidatedFunction):
         self.plain_text_only = plain_text_only
         self.engine = engine
         self.field_guidance = field_guidance
+        self.max_workers = max(1, int(max_workers)) if max_workers else 8
         self.document_level_fields = self._normalize_document_level_fields(document_level_fields)
         self._chunk_data_model = self._derive_chunk_data_model()
         self._document_level_data_model = self._derive_document_level_data_model()
@@ -1606,7 +1608,13 @@ class HierarchicalSummaryV2(ValidatedFunction):
             logger.info(f"[summarize-progress] chunk {idx}/{total} completed seconds={elapsed:.1f}")
             return result
 
-        tasks = [summarize_chunk(chunk, i + 1, len(chunks)) for i, chunk in enumerate(chunks)]
+        sem = asyncio.Semaphore(self.max_workers)
+
+        async def _bounded(chunk: str, idx: int, total: int):
+            async with sem:
+                return await summarize_chunk(chunk, idx, total)
+
+        tasks = [_bounded(chunk, i + 1, len(chunks)) for i, chunk in enumerate(chunks)]
         results = await asyncio.gather(*tasks)
         return results, len(results)
 
