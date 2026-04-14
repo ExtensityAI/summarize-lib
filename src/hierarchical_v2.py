@@ -332,6 +332,7 @@ class HierarchicalSummaryV2(ValidatedFunction):
         document_level_fields: Collection[str] | None = None,
         field_guidance: Optional[str] = None,
         max_workers: int = 8,
+        chunk_base_class: type[LLMDataModel] = LLMDataModel,
         *args,
         **kwargs,
     ):
@@ -359,6 +360,8 @@ class HierarchicalSummaryV2(ValidatedFunction):
         self.engine = engine
         self.field_guidance = field_guidance
         self.max_workers = max(1, int(max_workers)) if max_workers else 8
+        assert issubclass(chunk_base_class, LLMDataModel)
+        self._chunk_base_class = chunk_base_class
         self.document_level_fields = self._normalize_document_level_fields(document_level_fields)
         self._chunk_data_model = self._derive_chunk_data_model()
         self._document_level_data_model = self._derive_document_level_data_model()
@@ -921,7 +924,7 @@ class HierarchicalSummaryV2(ValidatedFunction):
             fields[field_name] = (field_info.annotation, field_info)
 
         model_name = f"{self.data_model.__name__}{model_name_suffix}"
-        return create_model(model_name, __base__=LLMDataModel, **fields)
+        return create_model(model_name, __base__=self._chunk_base_class, **fields)
 
     def _derive_chunk_data_model(self) -> type[LLMDataModel]:
         if not self.document_level_fields:

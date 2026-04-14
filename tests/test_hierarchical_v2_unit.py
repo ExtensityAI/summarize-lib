@@ -77,6 +77,60 @@ def _make_summarizer(*, chunker_name: str = "SemanticHybridChunker") -> Hierarch
     )
 
 
+def test_chunk_base_class_threads_through_derived_subset_model() -> None:
+    """`HierarchicalSummary` callers can override the base class used for
+    dynamically-derived chunk/document-level models, so consumers can attach
+    extra validators (e.g. auto-truncation of oversize lists) without forking
+    summarize-lib."""
+
+    from pydantic import model_validator
+
+    class _CustomBase(LLMDataModel):
+        @model_validator(mode="before")
+        @classmethod
+        def _marker(cls, data):
+            if isinstance(data, dict):
+                data.setdefault("_seen_by_custom_base", True)
+            return data
+
+    s = HierarchicalSummaryV2(
+        content="alpha\n\nbeta\n\ngamma",
+        document_name="unit.txt",
+        data_model=RichSchema,
+        document_level_fields={"asset_metadata"},
+        min_num_chunks=2,
+        min_chunk_size=64,
+        max_chunk_size=256,
+        chunk_base_class=_CustomBase,
+    )
+
+    chunk_model = s._chunk_data_model
+    assert chunk_model is not RichSchema  # must be a derived subset
+    assert _CustomBase in chunk_model.__mro__
+    assert "asset_metadata" not in chunk_model.model_fields  # excluded
+    assert "facts" in chunk_model.model_fields  # preserved
+
+    doc_level_model = s._document_level_data_model
+    assert doc_level_model is not None
+    assert _CustomBase in doc_level_model.__mro__
+
+
+def test_chunk_base_class_defaults_to_llm_data_model() -> None:
+    """When no chunk_base_class is provided the derived model still inherits
+    from LLMDataModel exactly like before — backwards compatibility."""
+    s = HierarchicalSummaryV2(
+        content="alpha\n\nbeta\n\ngamma",
+        document_name="unit.txt",
+        data_model=RichSchema,
+        document_level_fields={"asset_metadata"},
+        min_num_chunks=2,
+        min_chunk_size=64,
+        max_chunk_size=256,
+    )
+    chunk_model = s._chunk_data_model
+    assert LLMDataModel in chunk_model.__mro__
+
+
 def test_normalize_reader_content_avoids_list_repr() -> None:
     class DummyContent:
         def __init__(self, value):
