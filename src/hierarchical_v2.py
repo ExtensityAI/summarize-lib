@@ -693,6 +693,27 @@ class HierarchicalSummaryV2(ValidatedFunction):
             The final result must satisfy the provided JSON schema and stay faithful to the source.
             The type of content is specified in [[CONTENT TYPE]].
 
+            [Source Fidelity — absolute rule]
+            Every concrete detail in the output must come directly from the provided source text for this chunk.
+            Do NOT invent, infer beyond what is stated, extrapolate, or add content that is not explicitly in the
+            source — not even when schema fields have minimum item counts, not even when user context suggests
+            topics the source "ought to" cover, not even when an asset metadata hint tells you what the document
+            should be about. If the source text does not contain a concrete detail, omit it. It is always
+            correct to return fewer items in a list field than the schema minimum when the source does not
+            contain enough material; a faithful under-filled output is strictly preferred over a padded output
+            with invented items. Concretely, the following MUST come verbatim (or near-verbatim) from the source:
+              * named persons, organizations, places, products, brands, events
+              * dates, years, time periods, time ranges
+              * numbers, percentages, statistics, quantities, monetary values
+              * direct quotations and their attributions
+              * study names, journal citations, methodology details (participant counts, cohort descriptions,
+                experimental setups) — if you cite a named study, you may only extract its methodology details
+                that are in the source text you are processing
+              * biographical details
+            If a user_prompt or asset metadata below describes topics/themes the book wants covered, treat those
+            as a PRIORITIZATION hint (which parts of the source to focus on), NEVER as an instruction to invent
+            coverage of those topics when the source does not address them.
+
             {type_specific_prompt}
             {profile_specific_prompt}
             {asset_metadata_prompt}
@@ -705,17 +726,22 @@ class HierarchicalSummaryV2(ValidatedFunction):
             The output must be in the language specified in [[CONTENT LANGUAGE]], regardless of source language.
 
             [Key Requirements]
-            - Capture all salient information relevant to the schema field descriptions.
+            - Capture all salient information relevant to the schema field descriptions — but ONLY information
+              that is actually in the source chunk.
             - Prefer high recall over abstraction at chunk level; do not prematurely compress nuanced points.
+              Recall means extracting more of WHAT IS THERE, not inventing content to fill schema slots.
             - Keep field semantics distinct according to schema.
             - Preserve factual consistency between fields.
-            - For quote-like fields, keep quotations verbatim whenever possible.
-            - Keep atomic details explicit:
+            - For quote-like fields, keep quotations verbatim. Never fabricate a quote or its attribution.
+            - Keep atomic details explicit ONLY when they are in the source text:
               dates/years, numbers/percentages, named entities, countries/regions, product and policy terms.
             - Preserve evaluative qualifiers and uncertainty statements (for example: better-than-expected outcomes,
               constrained forecasts, caveats, conditions).
             - If two statements are similar but differ in timeframe, scope, cause, metric, or sentiment, keep both.
             - For interview-like content, retain speaker-specific claims and framing rather than collapsing to generic prose.
+            - **Under-fill > over-invent.** If a schema field asks for N items and the chunk only supports M < N
+              faithfully extractable items, return M items. An empty or short list is always a valid output when
+              the source does not contain more material.
         """
         )
         prompt_text += schema.instruct_llm()
