@@ -2018,6 +2018,20 @@ class HierarchicalSummaryV2(ValidatedFunction):
                 )
                 return
 
+    def _estimate_avg_item_tokens(self, candidates: List[Any], default: int = 120) -> int:
+        """Estimate average tokens per item from actual candidate data."""
+        all_items: List[Any] = []
+        for c in candidates:
+            if isinstance(c, list):
+                all_items.extend(c)
+            else:
+                all_items.append(c)
+        if not all_items:
+            return default
+        sample = all_items[:20]
+        total = sum(self._estimate_tokens_approx(_safe_jsonable(item)) for item in sample)
+        return max(default, total // len(sample))
+
     def _detail_list_min_items(self, field_name: str) -> int:
         # Prefer min_items from Pydantic Field json_schema_extra metadata
         field_info = self.data_model.model_fields.get(field_name)
@@ -2092,9 +2106,9 @@ class HierarchicalSummaryV2(ValidatedFunction):
             elif self._annotation_is_list_of_str(field_info.annotation) or self._annotation_is_list(field_info.annotation):
                 if self._annotation_is_list_of_str(field_info.annotation):
                     weight = 2.4
-                    list_like_fields.append(field_name)
                 else:
                     weight = 1.4
+                list_like_fields.append(field_name)
 
                 if explicit_weight is not None:
                     weight = float(explicit_weight)
@@ -2123,8 +2137,14 @@ class HierarchicalSummaryV2(ValidatedFunction):
             if not candidates:
                 continue
             min_items = self._detail_list_min_items(field_name)
-            # Approximate 18 tokens/item for compact factual bullets.
-            list_floor = max(88, min(260, int(min_items * 18)))
+            field_info = field_infos.get(field_name)
+            if field_info and self._annotation_is_list_of_structured_models(field_info.annotation):
+                # Structured models cost more per item; estimate from actual candidates.
+                avg_tokens = self._estimate_avg_item_tokens(candidates)
+                list_floor = max(256, int(min_items * avg_tokens * 0.6))
+            else:
+                # Approximate 18 tokens/item for compact factual bullets.
+                list_floor = max(88, min(260, int(min_items * 18)))
             budgets[field_name] = max(budgets.get(field_name, 64), list_floor)
 
         # Cap summary-like fields so they do not consume most of the output budget.
@@ -2145,12 +2165,17 @@ class HierarchicalSummaryV2(ValidatedFunction):
             )
             reduce_order.extend(f for f in list_like_fields if f not in reduce_order)
 
+            _list_like_set = set(list_like_fields)
             for field_name in reduce_order:
                 if overflow <= 0:
                     break
                 floor = 64
-                if field_name in list_like_fields:
-                    floor = min(96, budgets[field_name])
+                if field_name in _list_like_set:
+                    fi = field_infos.get(field_name)
+                    if fi and self._annotation_is_list_of_structured_models(fi.annotation):
+                        floor = min(512, budgets[field_name])
+                    else:
+                        floor = min(96, budgets[field_name])
                 room = max(0, budgets[field_name] - floor)
                 if room <= 0:
                     continue
