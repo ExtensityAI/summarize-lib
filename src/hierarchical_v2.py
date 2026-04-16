@@ -38,7 +38,6 @@ from tenacity import (
     wait_exponential_jitter,
 )
 from tiktoken import Encoding
-from tokenizers import Tokenizer
 
 from .functions import SchemaValidationError, ValidatedFunction
 from .hierarchical_v2_chunking import is_substantive_chunk, split_structural_segments
@@ -195,6 +194,8 @@ def get_current_tokenizer(tokenizer_name: str = "gpt2") -> Optional[Any]:
 
     if resolved is None:
         try:
+            from tokenizers import Tokenizer
+
             resolved = Tokenizer.from_pretrained(tokenizer_name)
         except Exception:
             resolved = None
@@ -528,10 +529,8 @@ class HierarchicalSummaryV2(ValidatedFunction):
             return count
 
         try:
-            if isinstance(tokenizer, Tokenizer):
-                count = len(tokenizer.encode(text).ids)
-            else:
-                count = len(tokenizer.encode(text))
+            encoded = tokenizer.encode(text)
+            count = len(encoded.ids) if hasattr(encoded, "ids") else len(encoded)
             self._token_cache_put(cache_key, count)
             return count
         except Exception:
@@ -829,11 +828,8 @@ class HierarchicalSummaryV2(ValidatedFunction):
             return count
 
         try:
-            if isinstance(tokenizer, Tokenizer):
-                count = len(tokenizer.encode(text).ids)
-            else:
-                # tiktoken encoding
-                count = len(tokenizer.encode(text))
+            encoded = tokenizer.encode(text)
+            count = len(encoded.ids) if hasattr(encoded, "ids") else len(encoded)
             self._token_cache_put(cache_key, count)
             self._log_token_usage(count, operation="fast_token_count")
             return count
