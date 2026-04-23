@@ -14,6 +14,7 @@ import math
 import os
 import re
 import tempfile
+import threading
 import time
 import urllib.request
 from collections import Counter, OrderedDict, defaultdict
@@ -309,6 +310,53 @@ DOC_TYPE_PROFILE_BY_DOCUMENT_TYPE: Dict[DocumentType, str] = {
 }
 
 
+class LLMCallTimeoutError(TimeoutError):
+    """Raised when a single LLM call exceeds the configured wall-clock timeout.
+
+    Ported from storyone's `_dispatch_generator_with_timeout` pattern.
+    Distinct from `SchemaValidationError` so the retry decorator in
+    `summarize_chunks` treats it as retryable (tenacity
+    `retry_if_not_exception_type(SchemaValidationError)` lets it through).
+    """
+
+
+def _run_with_wall_clock_timeout(fn, timeout_seconds: float, *, label: str = "llm-call"):
+    """Run *fn()* in a daemon thread with a hard wall-clock timeout.
+
+    If *fn* doesn't return inside `timeout_seconds`, raise
+    `LLMCallTimeoutError`. The worker thread keeps running in the background
+    until the underlying HTTP request resolves (Python has no preemptive
+    thread cancellation) — `daemon=True` ensures it dies with the process.
+    Propagates the caller's contextvars into the worker so any engine/logger
+    context is preserved.
+    """
+    if timeout_seconds is None or timeout_seconds <= 0:
+        return fn()
+
+    ctx = contextvars.copy_context()
+    result_box: Dict[str, Any] = {}
+
+    def _run():
+        try:
+            result_box["value"] = ctx.run(fn)
+        except BaseException as exc:  # noqa: BLE001
+            result_box["error"] = exc
+
+    thread = threading.Thread(target=_run, name=label, daemon=True)
+    thread.start()
+    thread.join(timeout=timeout_seconds)
+    if thread.is_alive():
+        logger.warning(
+            f"[summarize-timeout] {label} exceeded {timeout_seconds:.0f}s wall-clock — raising LLMCallTimeoutError"
+        )
+        raise LLMCallTimeoutError(
+            f"{label} exceeded {timeout_seconds:.0f}s wall-clock timeout"
+        )
+    if "error" in result_box:
+        raise result_box["error"]
+    return result_box["value"]
+
+
 class HierarchicalSummaryV2(ValidatedFunction):
     def __init__(
         self,
@@ -334,6 +382,7 @@ class HierarchicalSummaryV2(ValidatedFunction):
         field_guidance: Optional[str] = None,
         max_workers: int = 8,
         chunk_base_class: type[LLMDataModel] = LLMDataModel,
+        llm_call_timeout_seconds: Optional[float] = None,
         *args,
         **kwargs,
     ):
@@ -361,6 +410,11 @@ class HierarchicalSummaryV2(ValidatedFunction):
         self.engine = engine
         self.field_guidance = field_guidance
         self.max_workers = max(1, int(max_workers)) if max_workers else 8
+        self.llm_call_timeout_seconds = (
+            float(llm_call_timeout_seconds)
+            if llm_call_timeout_seconds is not None and float(llm_call_timeout_seconds) > 0
+            else None
+        )
         assert issubclass(chunk_base_class, LLMDataModel)
         self._chunk_base_class = chunk_base_class
         self.document_level_fields = self._normalize_document_level_fields(document_level_fields)
@@ -1607,11 +1661,25 @@ class HierarchicalSummaryV2(ValidatedFunction):
         schema = self._map_data_model()
         prompt_text = self._prompt_for_schema(schema)
 
+        def _log_chunk_retry(retry_state):
+            exc = retry_state.outcome.exception() if retry_state.outcome else None
+            exc_type = type(exc).__name__ if exc else "unknown"
+            exc_msg = str(exc)[:300] if exc else ""
+            next_sleep = getattr(retry_state, "next_action", None)
+            wait_s = getattr(next_sleep, "sleep", 0.0) if next_sleep else 0.0
+            logger.warning(
+                f"[summarize-retry] chunk map retry "
+                f"attempt={retry_state.attempt_number}/5 "
+                f"elapsed={retry_state.seconds_since_start:.1f}s "
+                f"next_wait={wait_s:.1f}s "
+                f"exc={exc_type}: {exc_msg}"
+            )
+
         @retry(
             retry=retry_if_not_exception_type(SchemaValidationError),
             wait=wait_exponential_jitter(initial=0.25, max=60),
             stop=stop_after_attempt(5),
-            before_sleep=before_sleep_log(logger, logger.level("INFO").no),
+            before_sleep=_log_chunk_retry,
         )
         async def summarize_chunk(chunk: str, idx: int, total: int):
             logger.info(f"[summarize-progress] chunk {idx}/{total} started")
@@ -2212,10 +2280,17 @@ class HierarchicalSummaryV2(ValidatedFunction):
 
         with self._track_step(f"validated_function_{stage}"):
             if self.engine is not None:
-                with DynamicEngine(model=self.engine.model, api_key=self.engine.api_key):
-                    res = fn(payload, **kwargs)
+                def _invoke():
+                    with DynamicEngine(model=self.engine.model, api_key=self.engine.api_key):
+                        return fn(payload, **kwargs)
             else:
-                res = fn(payload, **kwargs)
+                def _invoke():
+                    return fn(payload, **kwargs)
+            res = _run_with_wall_clock_timeout(
+                _invoke,
+                self.llm_call_timeout_seconds,
+                label=f"validated_function_{stage}",
+            )
         self._record_llm_call(
             stage,
             estimated_input_tokens=self._estimate_tokens_approx(payload) + self._estimate_tokens_approx(prompt_text),
