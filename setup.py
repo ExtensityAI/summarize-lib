@@ -24,6 +24,7 @@ setup(
         "loguru",
         "numpy",
         "tiktoken",
+        "chonkie>=0.4.1",
         "tokenizers",
     ],
 )
