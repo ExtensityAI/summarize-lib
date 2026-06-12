@@ -42,6 +42,7 @@ from tiktoken import Encoding
 
 from .functions import SchemaValidationError, ValidatedFunction
 from .hierarchical_v2_chunking import is_substantive_chunk, split_structural_segments
+from .chunking import HybridChunker
 from .hierarchical_v2_io import normalize_reader_content
 from .hierarchical_v2_reduce import (
     dedupe_unbounded_summary_text,
@@ -1475,116 +1476,50 @@ class HierarchicalSummaryV2(ValidatedFunction):
             return 0.0
         return dot / denom
 
+    def _recursive_split_for_chunker(self, text: str, chunk_size: int) -> List[str]:
+        """Oversized-segment fallback split, injected into the HybridChunker.
+
+        Mirrors the previous inline ``self.chunker(...)`` behaviour (return the
+        whole segment if the chunker raises)."""
+        try:
+            split = self.chunker(
+                data=Symbol(text),
+                chunker_name=self._chunker_name_for_fallback_split(),
+                chunk_size=chunk_size,
+            )
+            parts = [str(s) for s in split if str(s).strip()]
+            return parts if parts else [text]
+        except Exception:
+            return [text]
+
+    def _get_hybrid_chunker(self) -> HybridChunker:
+        """Lazily build the reusable chunker, wired with this instance's
+        embedder / token estimator / fallback splitter / boundary config so the
+        packing behaviour is identical to the previous inline implementation."""
+        chunker = getattr(self, "_hybrid_chunker_instance", None)
+        if chunker is None:
+            chunker = HybridChunker(
+                max_chunk_size=self.max_chunk_size,
+                min_chunk_size=self.min_chunk_size,
+                semantic=self._semantic_mode_enabled(),
+                boundary_config=self._semantic_boundary_config(),
+                embed_batch=self._embed_text_batch,
+                count_tokens=self._estimate_tokens_for_chunk_boundary,
+                recursive_split=self._recursive_split_for_chunker,
+                prepare_segments=self._prepare_segments_for_semantic_embedding,
+                embed_item_token_limit=self._embedding_item_token_limit(),
+                tokenizer_name=self.tokenizer_name,
+            )
+            self._hybrid_chunker_instance = chunker
+        return chunker
+
     def _pack_segments_semantic(self, segments: List[str], chunk_size: int) -> List[str]:
-        prepared_segments = self._prepare_segments_for_semantic_embedding(segments)
-        vectors = self._embed_text_batch(prepared_segments)
-        if not vectors or len(vectors) != len(prepared_segments):
-            return []
-
-        sims: List[float] = []
-        for i in range(len(prepared_segments) - 1):
-            sims.append(self._cosine_similarity(vectors[i], vectors[i + 1]))
-
-        soft_q, soft_fill_ratio, hard_q, hard_fill_ratio = self._semantic_boundary_config()
-        hard_threshold = 0.0
-        soft_threshold = 0.0
-        if sims:
-            sorted_sims = sorted(sims)
-            soft_threshold = self._quantile(sorted_sims, soft_q)
-            hard_threshold = self._quantile(sorted_sims, hard_q)
-        self._usage["chunking"]["semantic_boundary_threshold_soft"] = soft_threshold
-        self._usage["chunking"]["semantic_boundary_threshold_hard"] = hard_threshold
-
-        chunks: List[str] = []
-        current_parts: List[str] = []
-        current_tokens = 0
-
-        for i, segment in enumerate(prepared_segments):
-            segment_tokens = self._estimate_tokens_for_chunk_boundary(segment, chunk_size)
-
-            if segment_tokens >= chunk_size:
-                if current_parts:
-                    chunks.append("\n\n".join(current_parts))
-                    current_parts = []
-                    current_tokens = 0
-                try:
-                    split = self.chunker(
-                        data=Symbol(segment),
-                        chunker_name=self._chunker_name_for_fallback_split(),
-                        chunk_size=chunk_size,
-                    )
-                    chunks.extend([str(s) for s in split if str(s).strip()])
-                except Exception:
-                    chunks.append(segment)
-                continue
-
-            semantic_boundary_soft = False
-            semantic_boundary_hard = False
-            if i > 0 and i - 1 < len(sims):
-                sim = sims[i - 1]
-                semantic_boundary_soft = sim <= soft_threshold
-                semantic_boundary_hard = sim <= hard_threshold
-
-            should_flush = False
-            if current_parts and current_tokens + segment_tokens > chunk_size:
-                should_flush = True
-            elif current_parts and semantic_boundary_hard and current_tokens >= int(chunk_size * hard_fill_ratio):
-                should_flush = True
-            elif current_parts and semantic_boundary_soft and current_tokens >= int(chunk_size * soft_fill_ratio):
-                should_flush = True
-
-            if should_flush:
-                chunks.append("\n\n".join(current_parts))
-                current_parts = [segment]
-                current_tokens = segment_tokens
-            else:
-                current_parts.append(segment)
-                current_tokens += segment_tokens
-
-        if current_parts:
-            chunks.append("\n\n".join(current_parts))
-
-        return [c for c in chunks if c.strip()]
+        return self._get_hybrid_chunker().pack_semantic(
+            segments, chunk_size, stats=self._usage["chunking"]
+        )
 
     def _pack_segments_into_chunks(self, segments: List[str], chunk_size: int) -> List[str]:
-        if not segments:
-            return []
-
-        chunks: List[str] = []
-        current_parts: List[str] = []
-        current_tokens = 0
-
-        for segment in segments:
-            segment_tokens = self._estimate_tokens_for_chunk_boundary(segment, chunk_size)
-            if segment_tokens >= chunk_size:
-                if current_parts:
-                    chunks.append("\n\n".join(current_parts))
-                    current_parts = []
-                    current_tokens = 0
-
-                try:
-                    split = self.chunker(
-                        data=Symbol(segment),
-                        chunker_name=self._chunker_name_for_fallback_split(),
-                        chunk_size=chunk_size,
-                    )
-                    chunks.extend([str(s) for s in split if str(s).strip()])
-                except Exception:
-                    chunks.append(segment)
-                continue
-
-            if current_tokens + segment_tokens > chunk_size and current_parts:
-                chunks.append("\n\n".join(current_parts))
-                current_parts = [segment]
-                current_tokens = segment_tokens
-            else:
-                current_parts.append(segment)
-                current_tokens += segment_tokens
-
-        if current_parts:
-            chunks.append("\n\n".join(current_parts))
-
-        return [c for c in chunks if c.strip()]
+        return self._get_hybrid_chunker().pack_structural(segments, chunk_size)
 
     def chunk_by_token_count(self, text: str, chunk_size: int, include_context: bool = False) -> List[str]:
         del include_context

@@ -1,3 +1,4 @@
+from .chunking import HybridChunker, chunk_text
 from .hierarchical_v2 import (
     AssetMetadata,
     HierarchicalSummary,
@@ -13,9 +14,11 @@ __all__ = [
     "DocumentType",
     "HierarchicalSummary",
     "HierarchicalSummaryV2",
+    "HybridChunker",
     "Summary",
+    "chunk_text",
     "gather",
     "get_current_tokenizer",
 ]
 
-__version__ = "2.0.0"
+__version__ = "2.1.0"
