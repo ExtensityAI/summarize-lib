@@ -13,6 +13,7 @@ import json
 import math
 import os
 import re
+import sys
 import tempfile
 import threading
 import time
@@ -21,14 +22,14 @@ from collections import Counter, OrderedDict, defaultdict
 from contextlib import contextmanager
 from dataclasses import dataclass
 from textwrap import dedent
-from typing import Any, Collection, Dict, List, Optional, Tuple, Union, get_args, get_origin
+from typing import Any, Callable, Collection, Dict, List, Optional, Tuple, Union, get_args, get_origin
 
 import nest_asyncio
 from loguru import logger
 from pydantic import Field, create_model, field_validator
 from pydantic.fields import PydanticUndefined
 from symai import Symbol
-from symai.components import ChonkieChunker, DynamicEngine, FileReader, Function
+from symai.components import ChonkieChunker, DynamicEngine, FileReader, Function, MetadataTracker
 from symai.core_ext import bind
 from symai.functional import EngineRepository
 from symai.models import LLMDataModel
@@ -431,6 +432,14 @@ class HierarchicalSummaryV2(ValidatedFunction):
         self._usage = self._init_usage_tracking()
         self._token_count_cache: OrderedDict[Any, int] = OrderedDict()
         self._token_count_cache_max = 4096
+
+        # Real per-call LLM usage captured for engine calls that run off the
+        # caller's thread (map-stage workers, wall-clock-timeout threads). The
+        # host's enclosing MetadataTracker uses sys.settrace, which is per-thread
+        # and cannot see those calls; we collect them here so the host can fold
+        # them into the reported usage. See `_invoke_tracked` / `collected_usage_stats`.
+        self._tracked_usage_lock = threading.Lock()
+        self._tracked_usage_stats: List[dict] = []
 
         if file_link is not None:
             if file_link.startswith("http"):
@@ -1832,6 +1841,8 @@ class HierarchicalSummaryV2(ValidatedFunction):
 
     def forward(self, **kwargs) -> Summary:
         self.clear()
+        with self._tracked_usage_lock:
+            self._tracked_usage_stats = []
         self._usage = self._init_usage_tracking()
         self._usage["chunking"]["requested_strategy"] = self._requested_chunking_strategy()
         self._refresh_doc_profile_usage()
@@ -2250,6 +2261,47 @@ class HierarchicalSummaryV2(ValidatedFunction):
     def _dedupe_unbounded_summary_text(self, text: str) -> str:
         return dedupe_unbounded_summary_text(text)
 
+    @property
+    def collected_usage_stats(self) -> List[dict]:
+        """Real per-call LLM usage stats captured for engine calls that ran off
+        the host's tracking thread (one ``MetadataTracker.usage`` dict per call).
+
+        The host (e.g. storyone's ``generate()``) folds these into the reported
+        usage. Each dict is keyed by ``(engine_name, model_name)`` — the shape
+        ``UsageInfo.from_usage_stats`` expects. Reset at the start of every
+        ``forward()``, so it reflects only the latest run.
+        """
+        with self._tracked_usage_lock:
+            return list(self._tracked_usage_stats)
+
+    def _invoke_tracked(self, fn: Callable[[], Any]) -> Any:
+        """Run ``fn()`` and, when no enclosing ``MetadataTracker`` is tracing the
+        current thread, capture its real LLM usage into ``_tracked_usage_stats``.
+
+        ``MetadataTracker`` (symai) hooks ``sys.settrace``, which is per-thread.
+        When this call runs on a worker/timeout thread (map stage, wall-clock
+        timeout), the host's tracker — installed on a different thread — never
+        sees it. We detect that case via ``sys.gettrace()`` and install our own
+        per-call tracker so the usage isn't lost. When an enclosing tracker IS
+        active on this thread (e.g. the document-level/merge calls running on the
+        host's own thread), we do nothing and let it count the call — avoiding a
+        double-count. Robust to nesting and to the timeout config either way.
+        """
+        if isinstance(getattr(sys.gettrace(), "__self__", None), MetadataTracker):
+            # An enclosing MetadataTracker already traces this thread.
+            return fn()
+        tracker = MetadataTracker()
+        with tracker:
+            result = fn()
+        try:
+            if len(tracker.metadata) > 0:
+                stats = tracker.usage
+                with self._tracked_usage_lock:
+                    self._tracked_usage_stats.append(stats)
+        except Exception:
+            logger.warning("Failed to capture off-thread LLM usage", exc_info=True)
+        return result
+
     def _call_validated_function(
         self,
         fn: ValidatedFunction,
@@ -2268,13 +2320,20 @@ class HierarchicalSummaryV2(ValidatedFunction):
             kwargs["max_completion_tokens"] = max_completion_tokens
 
         with self._track_step(f"validated_function_{stage}"):
+            # `_invoke_tracked` is entered *inside* `_invoke` so the per-call
+            # MetadataTracker is installed on whichever thread actually runs the
+            # engine call — the wall-clock-timeout daemon thread when a timeout is
+            # set, otherwise the calling thread (which may itself be a map-stage
+            # worker). That is exactly where the host's tracker can't reach.
             if self.engine is not None:
                 def _invoke():
-                    with DynamicEngine(model=self.engine.model, api_key=self.engine.api_key):
-                        return fn(payload, **kwargs)
+                    def _call():
+                        with DynamicEngine(model=self.engine.model, api_key=self.engine.api_key):
+                            return fn(payload, **kwargs)
+                    return self._invoke_tracked(_call)
             else:
                 def _invoke():
-                    return fn(payload, **kwargs)
+                    return self._invoke_tracked(lambda: fn(payload, **kwargs))
             res = _run_with_wall_clock_timeout(
                 _invoke,
                 self.llm_call_timeout_seconds,
