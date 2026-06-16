@@ -127,6 +127,28 @@ def test_max_context_tokens_reads_active_processing_engine(monkeypatch) -> None:
     assert s._max_context_tokens() == 999_983
 
 
+def test_underlying_retry_error_preserves_transient_message() -> None:
+    """A RetryError from exhausted chunk retries must unwrap to the underlying error
+    so a transient '503 UNAVAILABLE' message survives for the outer retry classifier
+    — otherwise the opaque RetryError[<Future...>] is classified non-retryable and
+    the asset call 500s instead of retrying the transient provider overload."""
+    from tenacity import RetryError, retry, stop_after_attempt
+
+    @retry(stop=stop_after_attempt(1))
+    def _always_503():
+        raise ValueError("Error during generation. Caused by: 503 UNAVAILABLE")
+
+    s = _make_summarizer()
+    try:
+        _always_503()
+        raise AssertionError("expected RetryError")
+    except RetryError as err:
+        underlying = s._underlying_retry_error(err)
+
+    assert isinstance(underlying, ValueError)
+    assert "503 UNAVAILABLE" in str(underlying)
+
+
 def test_chunk_base_class_threads_through_derived_subset_model() -> None:
     """`HierarchicalSummary` callers can override the base class used for
     dynamically-derived chunk/document-level models, so consumers can attach

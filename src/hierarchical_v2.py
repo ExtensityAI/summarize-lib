@@ -35,6 +35,7 @@ from symai.models import LLMDataModel
 from tenacity import (
     before_sleep_log,
     retry,
+    RetryError,
     retry_if_not_exception_type,
     stop_after_attempt,
     wait_exponential_jitter,
@@ -1622,6 +1623,17 @@ class HierarchicalSummaryV2(ValidatedFunction):
             self._usage["chunking"]["chunks"] = len(normalized)
             return normalized
 
+    @staticmethod
+    def _underlying_retry_error(err: RetryError) -> BaseException:
+        """Unwrap a tenacity RetryError to its underlying exception so a transient
+        provider error's message (e.g. '503 UNAVAILABLE') survives for the outer
+        generation-retry classifier — instead of the opaque RetryError[<Future...>]
+        that drops the signal and gets classified non-retryable."""
+        last = getattr(err, "last_attempt", None)
+        if last is not None and last.failed:
+            return last.exception()
+        return err
+
     async def summarize_chunks(self, chunks: List[str], **kwargs) -> Tuple[List[LLMDataModel], int]:
         schema = self._map_data_model()
         prompt_text = self._prompt_for_schema(schema)
@@ -1634,7 +1646,7 @@ class HierarchicalSummaryV2(ValidatedFunction):
             wait_s = getattr(next_sleep, "sleep", 0.0) if next_sleep else 0.0
             logger.warning(
                 f"[summarize-retry] chunk map retry "
-                f"attempt={retry_state.attempt_number}/5 "
+                f"attempt={retry_state.attempt_number}/8 "
                 f"elapsed={retry_state.seconds_since_start:.1f}s "
                 f"next_wait={wait_s:.1f}s "
                 f"exc={exc_type}: {exc_msg}"
@@ -1642,8 +1654,12 @@ class HierarchicalSummaryV2(ValidatedFunction):
 
         @retry(
             retry=retry_if_not_exception_type(SchemaValidationError),
-            wait=wait_exponential_jitter(initial=0.25, max=60),
-            stop=stop_after_attempt(5),
+            # Longer backoff for transient provider overload (e.g. Gemini 503
+            # "high demand"): the old initial=0.25 produced ~1-3s early waits that
+            # just re-hit the overload and exhausted in ~70s. Start higher and allow
+            # more attempts so a sustained capacity dip gets a real recovery window.
+            wait=wait_exponential_jitter(initial=2.0, max=60),
+            stop=stop_after_attempt(8),
             before_sleep=_log_chunk_retry,
         )
         async def summarize_chunk(chunk: str, idx: int, total: int):
@@ -1670,7 +1686,15 @@ class HierarchicalSummaryV2(ValidatedFunction):
 
         async def _bounded(chunk: str, idx: int, total: int):
             async with sem:
-                return await summarize_chunk(chunk, idx, total)
+                try:
+                    return await summarize_chunk(chunk, idx, total)
+                except RetryError as err:
+                    # Surface the underlying error (e.g. "503 UNAVAILABLE") rather
+                    # than the opaque RetryError[<Future...>] that loses it, so the
+                    # outer generation-retry classifier can recognise a transient
+                    # provider error and retry the whole call instead of failing it
+                    # as non-retryable.
+                    raise self._underlying_retry_error(err) from err
 
         tasks = [_bounded(chunk, i + 1, len(chunks)) for i, chunk in enumerate(chunks)]
         results = await asyncio.gather(*tasks)
