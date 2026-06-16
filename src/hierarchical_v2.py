@@ -30,6 +30,7 @@ from pydantic.fields import PydanticUndefined
 from symai import Symbol
 from symai.components import ChonkieChunker, DynamicEngine, FileReader, Function
 from symai.core_ext import bind
+from symai.functional import EngineRepository
 from symai.models import LLMDataModel
 from tenacity import (
     before_sleep_log,
@@ -820,8 +821,27 @@ class HierarchicalSummaryV2(ValidatedFunction):
     def _compute_required_tokens(self):
         pass
 
+    def _max_context_tokens(self) -> int:
+        """Context window of the ACTIVE processing engine — the model set via the
+        DynamicEngine context in ``_forward_with_engine`` — so chunk sizing reflects
+        the real model in use rather than symai's global default engine (which may
+        report a different model's limits; ``@bind`` does not follow the context).
+        Falls back to the bound default engine when no processing engine is active or
+        the value is unavailable."""
+        try:
+            value = getattr(EngineRepository.get("neurosymbolic"), "max_context_tokens", None)
+            if isinstance(value, int) and value > 0:
+                return value
+        except Exception:
+            pass
+        try:
+            value = self._bound_max_context_tokens()
+            return value if isinstance(value, int) and value > 0 else 0
+        except Exception:
+            return 0
+
     @bind(engine="neurosymbolic", property="max_context_tokens")
-    def _max_context_tokens(_):
+    def _bound_max_context_tokens(_):
         pass
 
     @bind(engine="neurosymbolic", property="max_response_tokens")
@@ -911,7 +931,17 @@ class HierarchicalSummaryV2(ValidatedFunction):
             seed=self.seed,
         )
 
-        count = self._compute_required_tokens(preview.prop.prepared_input)
+        prepared_input = preview.prop.prepared_input
+        try:
+            count = self._compute_required_tokens(prepared_input)
+        except Exception:
+            # `_compute_required_tokens` binds to the neurosymbolic engine's token
+            # counter, which assumes that engine's prepared-message shape — OpenAI
+            # engines iterate dict messages via `message.items()`. Other processing
+            # models (e.g. Gemini) prepare the prompt as a plain string, which crashes
+            # that counter. Fall back to an engine-agnostic tokenizer count of the
+            # prepared prompt so chunk sizing works for any processing model.
+            count = self._fast_path_token_count(prepared_input)
         self._log_token_usage(count, operation="prompt_token_count")
         return count
 

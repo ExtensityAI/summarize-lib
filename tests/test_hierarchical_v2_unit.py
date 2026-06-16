@@ -77,6 +77,56 @@ def _make_summarizer(*, chunker_name: str = "SemanticHybridChunker") -> Hierarch
     )
 
 
+def test_compute_required_tokens_falls_back_when_engine_counter_raises(monkeypatch) -> None:
+    """When the bound neurosymbolic token counter can't parse the prepared prompt
+    (e.g. a Gemini processing engine prepares a plain string, crashing the OpenAI
+    counter's `message.items()`), compute_required_tokens must fall back to an
+    engine-agnostic tokenizer count instead of propagating the crash — otherwise
+    asset processing 500s on any non-OpenAI processing model."""
+    s = _make_summarizer()
+
+    class _Prop:
+        prepared_input = "system: extract material\nuser: alpha paragraph"
+
+    class _Preview:
+        prop = _Prop()
+
+    class _FakeFunction:
+        def __init__(self, **_kwargs):
+            pass
+
+        def __call__(self, *_args, **_kwargs):
+            return _Preview()
+
+    monkeypatch.setattr("src.hierarchical_v2.Function", _FakeFunction)
+
+    def _boom(_prepared):
+        raise AttributeError("'str' object has no attribute 'items'")
+
+    monkeypatch.setattr(s, "_compute_required_tokens", _boom)
+
+    count = s.compute_required_tokens("alpha paragraph", count_context=True)
+    assert isinstance(count, int)
+    assert count > 0
+
+
+def test_max_context_tokens_reads_active_processing_engine(monkeypatch) -> None:
+    """_max_context_tokens must read the ACTIVE processing engine's context window
+    (set via the DynamicEngine context), not symai's global default engine — so
+    chunk sizing reflects the real model in use (futureproofing for non-default
+    processing models)."""
+    s = _make_summarizer()
+
+    class _FakeEngine:
+        max_context_tokens = 999_983  # distinctive value no real model reports
+
+    monkeypatch.setattr(
+        "src.hierarchical_v2.EngineRepository.get", lambda _name: _FakeEngine()
+    )
+
+    assert s._max_context_tokens() == 999_983
+
+
 def test_chunk_base_class_threads_through_derived_subset_model() -> None:
     """`HierarchicalSummary` callers can override the base class used for
     dynamically-derived chunk/document-level models, so consumers can attach
