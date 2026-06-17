@@ -26,12 +26,12 @@ TYPE_SPECIFIC_PROMPTS = {
             - Highlight the reviewed topics, key findings from literature, and synthesis of current knowledge.
             """,
     DocumentType.KEYNOTE: """
-            - Identify the presenter, target audience, and overall structure.
+            - Identify the presenter, target audience, and overall structure. Only name the presenter if the source explicitly states who they are; if the talk is unattributed, leave the speaker null rather than inferring a likely public figure from the topic.
             - Include speaker details and their expertise. Highlight key messages and main takeaways.""",
     DocumentType.PRESENTATION_SLIDES: """
-            - Identify the presenter, target audience, and overall structure.
+            - Identify the presenter, target audience, and overall structure. Only name the presenter if the source explicitly identifies them; do not infer a speaker from the subject matter.
             - Determine if this is a motivational talk, results presentation, or idea/pitch. For motivational talks, focus on key messages and call-to-action. For result presentations, emphasize numerical results and achievements. For idea/pitch presentations, highlight the core idea and value proposition.""",
-    DocumentType.INTERVIEW: "Identify and distinguish between different speakers. Include key quotes and main discussion points.",
+    DocumentType.INTERVIEW: "Identify and distinguish between different speakers. Include key quotes and main discussion points. Only name a speaker that the source explicitly identifies; if a participant is unnamed, leave them unnamed rather than guessing.",
     DocumentType.REPORT: "Highlight numerical results, key statistics, and main takeaways. Include significant findings and conclusions.",
     DocumentType.BOOK: "Include author information, main plot points, and key character descriptions. Highlight character development and relationships.",
 }

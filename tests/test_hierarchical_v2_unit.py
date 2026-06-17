@@ -934,3 +934,119 @@ def test_asset_metadata_survives_budget_enforcement(monkeypatch) -> None:
     assert result.asset_metadata.speakers == ["Speaker A", "Speaker B"]
     assert result.asset_metadata.publisher_or_collection == "Interview Series"
     assert result.asset_metadata.publication_year == "2024"
+
+
+# ---------------------------------------------------------------------------
+# Source-corroboration of asset_metadata speakers/authors (anti-hallucination)
+# ---------------------------------------------------------------------------
+
+# An unattributed talk: the speaker is never named in the source.
+_ANON_TALK = (
+    "imagine you're in the supermarket. you will find natural products, light products, "
+    "vegan products, low-fat low-sugar products — more healthy food than ever. in parallel "
+    "obesity is rising, diabetes is rising. we spent the last 13 years on research about "
+    "blood glucose levels and I'm pretty sure we ask the wrong questions. today I want to "
+    "talk about the biggest myth around sugar."
+)
+
+
+def _metadata_summarizer(content: str, *, user_prompt: str = "extract useful material"):
+    return HierarchicalSummaryV2(
+        content=content,
+        document_name="talk.txt",
+        data_model=RichSchema,
+        min_num_chunks=2,
+        min_chunk_size=64,
+        max_chunk_size=256,
+        max_output_tokens=None,
+        user_prompt=user_prompt,
+        include_quotes=False,
+        tokenizer_name="gpt2",
+        chunker_name="SemanticHybridChunker",
+    )
+
+
+def test_drop_uncorroborated_speaker_from_unattributed_talk() -> None:
+    # The reproduced NEOH bug: a topic-famous name guessed as the speaker of an
+    # anonymous talk. The name is in neither the source nor the user_prompt.
+    s = _metadata_summarizer(_ANON_TALK)
+    res = RichSchema(
+        summary="A talk about the sugar myth and blood glucose.",
+        facts=[],
+        asset_metadata=NestedAssetMetadata(document_type="talk", speakers=["Jessie Inchauspé"]),
+    )
+
+    s._drop_uncorroborated_metadata_names(res)
+
+    assert res.asset_metadata.speakers is None
+
+
+def test_preserve_speaker_named_in_source() -> None:
+    s = _metadata_summarizer("Hello everyone, I'm Doctor Sarah Lindqvist. " + _ANON_TALK)
+    res = RichSchema(
+        summary="A talk about blood glucose.",
+        facts=[],
+        asset_metadata=NestedAssetMetadata(document_type="talk", speakers=["Sarah Lindqvist"]),
+    )
+
+    s._drop_uncorroborated_metadata_names(res)
+
+    assert res.asset_metadata.speakers == ["Sarah Lindqvist"]
+
+
+def test_drop_only_uncorroborated_name_from_mixed_author_list() -> None:
+    s = _metadata_summarizer("By Jane Roe. " + _ANON_TALK)
+    res = RichSchema(
+        summary="An article.",
+        facts=[],
+        asset_metadata=NestedAssetMetadata(
+            document_type="article", authors=["Jane Roe", "Jessie Inchauspé"]
+        ),
+    )
+
+    s._drop_uncorroborated_metadata_names(res)
+
+    assert res.asset_metadata.authors == ["Jane Roe"]
+
+
+def test_user_prompt_corroborates_speaker_name() -> None:
+    # A caller-supplied document context that names the speaker is part of what the
+    # model sees, so a name present only there is corroborated (not a hallucination).
+    s = _metadata_summarizer(
+        _ANON_TALK, user_prompt="This is a talk by Manuel Zeller about sugar."
+    )
+    res = RichSchema(
+        summary="A talk.",
+        facts=[],
+        asset_metadata=NestedAssetMetadata(document_type="talk", speakers=["Manuel Zeller"]),
+    )
+
+    s._drop_uncorroborated_metadata_names(res)
+
+    assert res.asset_metadata.speakers == ["Manuel Zeller"]
+
+
+def test_accented_name_in_source_is_corroborated() -> None:
+    # Diacritic folding: the metadata name carries an accent the transcript omits.
+    s = _metadata_summarizer("Welcome. My name is Beyonce Knowles. " + _ANON_TALK)
+    res = RichSchema(
+        summary="A talk.",
+        facts=[],
+        asset_metadata=NestedAssetMetadata(document_type="talk", speakers=["Beyoncé Knowles"]),
+    )
+
+    s._drop_uncorroborated_metadata_names(res)
+
+    assert res.asset_metadata.speakers == ["Beyoncé Knowles"]
+
+
+def test_asset_metadata_guidance_includes_verbatim_name_rule() -> None:
+    s = _metadata_summarizer(_ANON_TALK)
+    s.document_type = DocumentType.INTERVIEW
+
+    prompt = s.prompt
+
+    assert "appears verbatim in the source" in prompt
+    assert "Never infer, guess" in prompt
+    # The interview type-specific guidance also reinforces the rule.
+    assert "Only name a speaker that the source explicitly identifies" in prompt

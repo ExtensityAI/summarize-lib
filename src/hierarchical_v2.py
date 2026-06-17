@@ -17,6 +17,7 @@ import sys
 import tempfile
 import threading
 import time
+import unicodedata
 import urllib.request
 from collections import Counter, OrderedDict, defaultdict
 from contextlib import contextmanager
@@ -155,6 +156,47 @@ def always_get_an_event_loop() -> asyncio.AbstractEventLoop:
 
 def _sanitize_model_name(name: str) -> str:
     return re.sub(r"[^a-zA-Z0-9_]", "_", name)
+
+
+# Word tokenizer for name-corroboration. Unicode-aware so it works across
+# scripts/languages without any per-language word lists.
+_NAME_MATCH_TOKEN_RE = re.compile(r"\w+", re.UNICODE)
+
+
+def _normalize_for_name_match(text: Any) -> str:
+    """Lowercase + strip diacritics so accented names match their plain form.
+
+    Language-agnostic: NFKD decomposition drops combining marks (e.g. "Inchauspé"
+    -> "inchauspe") and casefold handles case across scripts.
+    """
+    decomposed = unicodedata.normalize("NFKD", str(text))
+    without_marks = "".join(ch for ch in decomposed if not unicodedata.combining(ch))
+    return without_marks.casefold()
+
+
+def _name_match_tokens(normalized_text: str) -> List[str]:
+    return _NAME_MATCH_TOKEN_RE.findall(normalized_text)
+
+
+def _name_occurs_in_source(
+    name: str, *, normalized_source: str, source_tokens: set
+) -> bool:
+    """True when a person-name plausibly occurs in the source text.
+
+    Corroboration rule (deterministic, language-agnostic): the full normalized name
+    appears as a substring of the source, OR every significant token of the name
+    (alphabetic-ish, length >= 2; single-letter initials are ignored) appears as a
+    word in the source. Names with no usable token are treated as uncorroborated.
+    """
+    normalized_name = _normalize_for_name_match(name)
+    tokens = _name_match_tokens(normalized_name)
+    significant = [t for t in tokens if len(t) >= 2 and not t.isdigit()]
+    if not significant:
+        return False
+    joined = " ".join(tokens)
+    if joined and joined in normalized_source:
+        return True
+    return all(tok in source_tokens for tok in significant)
 
 
 def _safe_jsonable(value: Any) -> Any:
@@ -1079,6 +1121,8 @@ class HierarchicalSummaryV2(ValidatedFunction):
             - Always set `asset_metadata.document_type` when the detected content type is clear.
             - For article/report/scientific paper/review/wiki/book content, prioritize title, authors, publisher_or_collection, and publication_year.
             - For interview/podcast/talk/keynote/presentation content, prioritize speakers and keep speaker-specific claims separated in facts/quotes.
+            - Only list a name under `authors` or `speakers` if that exact name appears verbatim in the source text (e.g. a byline, a "by [Name]" credit, a masthead/copyright line, a panel or speaker introduction, or an explicit self-introduction).
+            - If the source is unattributed or anonymous — it never states who wrote or said it — leave `authors` and `speakers` null. Never infer, guess, or fill in a likely author, expert, or public figure from the topic, subject matter, writing style, or your own background knowledge.
             - Leave unknown metadata fields null instead of inventing values.
             """
         )
@@ -1933,6 +1977,7 @@ class HierarchicalSummaryV2(ValidatedFunction):
             if hasattr(res, "type"):
                 res.type = doc_type
 
+            self._drop_uncorroborated_metadata_names(res)
             self._sanitize_contradictory_summary_intro(res)
 
             final_tokens = self.compute_required_tokens_graceful(res, count_context=False)
@@ -2060,6 +2105,50 @@ class HierarchicalSummaryV2(ValidatedFunction):
             elif value not in (None, "", [], {}):
                 return True
         return False
+
+    def _drop_uncorroborated_metadata_names(self, result: LLMDataModel) -> None:
+        """Drop hallucinated `asset_metadata` speakers/authors not present in the source.
+
+        The document-level extraction can guess a topic-famous person as the speaker
+        or author of an unattributed source (a content -> celebrity hallucination),
+        even when the fact-level extraction correctly leaves attribution null. This
+        deterministic, language-agnostic backstop removes any speaker/author name
+        whose tokens are not found in the asset's own source text (plus the caller's
+        user_prompt, which the model also sees). Names that do occur in the source
+        are preserved.
+        """
+        md = getattr(result, "asset_metadata", None)
+        if md is None:
+            return
+
+        source_parts = [self.content_only or self.content or ""]
+        if self.user_prompt:
+            source_parts.append(str(self.user_prompt))
+        normalized_source = _normalize_for_name_match("\n".join(source_parts))
+        if not normalized_source.strip():
+            return
+        source_tokens = set(_name_match_tokens(normalized_source))
+
+        for field in ("speakers", "authors"):
+            names = getattr(md, field, None)
+            if not names:
+                continue
+            kept = [
+                name
+                for name in names
+                if name
+                and _name_occurs_in_source(
+                    str(name),
+                    normalized_source=normalized_source,
+                    source_tokens=source_tokens,
+                )
+            ]
+            if len(kept) != len(names):
+                dropped = [name for name in names if name not in kept]
+                logger.warning(
+                    f"Dropping uncorroborated asset_metadata.{field} not found in source: {dropped}"
+                )
+                setattr(md, field, kept or None)
 
     def _sanitize_contradictory_summary_intro(self, result: LLMDataModel) -> None:
         summary = getattr(result, "summary", None)
