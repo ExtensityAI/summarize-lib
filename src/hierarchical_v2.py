@@ -178,15 +178,48 @@ def _name_match_tokens(normalized_text: str) -> List[str]:
     return _NAME_MATCH_TOKEN_RE.findall(normalized_text)
 
 
+# Max token distance within which all parts of a multi-token name must co-occur to
+# count as "present". Tight enough to reject a topic-famous name whose parts are
+# independently common words scattered across the document (e.g. "Bill"/"Gates"),
+# wide enough to allow a title/initials between name parts ("Doctor Jane A. Smith").
+_NAME_COOCCUR_WINDOW = 8
+
+
+def _tokens_cooccur_within_window(
+    token_positions: Dict[str, List[int]], needed: List[str], window: int
+) -> bool:
+    """True if all `needed` tokens appear within a span of <= `window` tokens.
+
+    Smallest-window-containing-all-keywords sweep over the precomputed per-token
+    position lists. Language-agnostic; operates on token indices only.
+    """
+    if any(tok not in token_positions for tok in needed):
+        return False
+    pointers = {tok: 0 for tok in needed}
+    while True:
+        current = {tok: token_positions[tok][pointers[tok]] for tok in needed}
+        if max(current.values()) - min(current.values()) < window:
+            return True
+        # advance the token sitting at the earliest position
+        earliest = min(current, key=lambda t: current[t])
+        pointers[earliest] += 1
+        if pointers[earliest] >= len(token_positions[earliest]):
+            return False
+
+
 def _name_occurs_in_source(
-    name: str, *, normalized_source: str, source_tokens: set
+    name: str, *, normalized_source: str, source_token_positions: Dict[str, List[int]]
 ) -> bool:
     """True when a person-name plausibly occurs in the source text.
 
     Corroboration rule (deterministic, language-agnostic): the full normalized name
-    appears as a substring of the source, OR every significant token of the name
-    (alphabetic-ish, length >= 2; single-letter initials are ignored) appears as a
-    word in the source. Names with no usable token are treated as uncorroborated.
+    appears as a substring of the source, OR — for a multi-token name — every
+    significant token (length >= 2, non-numeric; single-letter initials are ignored)
+    appears AND the parts co-occur within a small token window. The proximity
+    requirement is what rejects a topic-famous name whose parts are independently
+    common words scattered across the document; a name genuinely in the source (a
+    byline, self-introduction, or panel intro) appears with its parts adjacent.
+    Names with no usable token are treated as uncorroborated.
     """
     normalized_name = _normalize_for_name_match(name)
     tokens = _name_match_tokens(normalized_name)
@@ -196,7 +229,11 @@ def _name_occurs_in_source(
     joined = " ".join(tokens)
     if joined and joined in normalized_source:
         return True
-    return all(tok in source_tokens for tok in significant)
+    if len(significant) == 1:
+        return significant[0] in source_token_positions
+    return _tokens_cooccur_within_window(
+        source_token_positions, significant, _NAME_COOCCUR_WINDOW
+    )
 
 
 def _safe_jsonable(value: Any) -> Any:
@@ -2125,24 +2162,31 @@ class HierarchicalSummaryV2(ValidatedFunction):
         if self.user_prompt:
             source_parts.append(str(self.user_prompt))
         normalized_source = _normalize_for_name_match("\n".join(source_parts))
-        if not normalized_source.strip():
-            return
-        source_tokens = set(_name_match_tokens(normalized_source))
+        have_source = bool(normalized_source.strip())
+        source_token_positions: Dict[str, List[int]] = {}
+        for position, token in enumerate(_name_match_tokens(normalized_source)):
+            source_token_positions.setdefault(token, []).append(position)
 
         for field in ("speakers", "authors"):
             names = getattr(md, field, None)
             if not names:
                 continue
-            kept = [
-                name
-                for name in names
-                if name
-                and _name_occurs_in_source(
-                    str(name),
-                    normalized_source=normalized_source,
-                    source_tokens=source_tokens,
-                )
-            ]
+            if not have_source:
+                # No usable source text to corroborate against: any model-supplied
+                # name is by definition uncorroborated -> fail closed (drop), rather
+                # than silently trusting a name that cannot be checked.
+                kept: List[str] = []
+            else:
+                kept = [
+                    name
+                    for name in names
+                    if name
+                    and _name_occurs_in_source(
+                        str(name),
+                        normalized_source=normalized_source,
+                        source_token_positions=source_token_positions,
+                    )
+                ]
             if len(kept) != len(names):
                 dropped = [name for name in names if name not in kept]
                 logger.warning(

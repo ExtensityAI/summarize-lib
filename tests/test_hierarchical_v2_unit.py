@@ -1050,3 +1050,58 @@ def test_asset_metadata_guidance_includes_verbatim_name_rule() -> None:
     assert "Never infer, guess" in prompt
     # The interview type-specific guidance also reinforces the rule.
     assert "Only name a speaker that the source explicitly identifies" in prompt
+
+
+def test_drop_topic_famous_name_with_scattered_common_tokens() -> None:
+    # Harden-more: a topic-famous name whose parts are independently common words
+    # scattered far apart in the source must NOT count as corroborated. Under the
+    # old "every token appears somewhere" rule "Bill Gates" would survive because
+    # "bill" and "gates" both appear; the proximity rule rejects it.
+    source = (
+        "Please remember to pay the electricity bill on time every single month "
+        "without fail, and also do not forget that the old garden gates need a "
+        "fresh coat of paint before winter arrives."
+    )
+    s = _metadata_summarizer(source)
+    res = RichSchema(
+        summary="An announcement.",
+        facts=[],
+        asset_metadata=NestedAssetMetadata(document_type="talk", speakers=["Bill Gates"]),
+    )
+
+    s._drop_uncorroborated_metadata_names(res)
+
+    assert res.asset_metadata.speakers is None
+
+
+def test_preserve_name_with_initial_within_window() -> None:
+    # Proximity must still allow a title/initial between name parts.
+    s = _metadata_summarizer("Welcome. Today's keynote is by John A. Smith. " + _ANON_TALK)
+    res = RichSchema(
+        summary="A keynote.",
+        facts=[],
+        asset_metadata=NestedAssetMetadata(document_type="talk", speakers=["John Smith"]),
+    )
+
+    s._drop_uncorroborated_metadata_names(res)
+
+    assert res.asset_metadata.speakers == ["John Smith"]
+
+
+def test_fail_closed_when_no_source_text() -> None:
+    # Harden-more: with no usable source text to corroborate against, a model-
+    # supplied name is uncorroborated by definition and must be dropped (fail
+    # closed) rather than silently trusted.
+    s = _metadata_summarizer(_ANON_TALK)
+    s.content = ""
+    s.content_only = ""
+    s.user_prompt = None
+    res = RichSchema(
+        summary="",
+        facts=[],
+        asset_metadata=NestedAssetMetadata(document_type="talk", speakers=["Anyone At All"]),
+    )
+
+    s._drop_uncorroborated_metadata_names(res)
+
+    assert res.asset_metadata.speakers is None
