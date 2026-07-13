@@ -1818,7 +1818,7 @@ class HierarchicalSummaryV2(ValidatedFunction):
 
         with self._track_step("detect_document_type"):
             if self.engine is not None:
-                with DynamicEngine(model=self.engine.model, api_key=self.engine.api_key):
+                with self._rewrapped_engine():
                     res = doc_type_func(
                         content,
                         preview=False,
@@ -1861,7 +1861,7 @@ class HierarchicalSummaryV2(ValidatedFunction):
 
         with self._track_step("detect_document_language"):
             if self.engine is not None:
-                with DynamicEngine(model=self.engine.model, api_key=self.engine.api_key):
+                with self._rewrapped_engine():
                     res = doc_lang_func(
                         content,
                         preview=False,
@@ -1883,6 +1883,20 @@ class HierarchicalSummaryV2(ValidatedFunction):
 
         return res.language
 
+    def _rewrapped_engine(self) -> DynamicEngine:
+        """Fresh DynamicEngine wrapping the caller-provided engine, for use as the active
+        processing-engine context. A fresh instance (rather than reusing ``self.engine``)
+        keeps per-worker context state isolated across parallel map stages. Forward the
+        engine attributes that carry caller intent beyond model + api_key — currently the
+        OpenAI Responses cache policy — so e.g. an explicit prompt-cache mode configured on
+        the passed engine is not silently dropped on the internal LLM calls.
+        """
+        return DynamicEngine(
+            model=self.engine.model,
+            api_key=self.engine.api_key,
+            prompt_cache_options=getattr(self.engine, "prompt_cache_options", None),
+        )
+
     def forward(self, **kwargs) -> Summary:
         self.clear()
         with self._tracked_usage_lock:
@@ -1896,7 +1910,7 @@ class HierarchicalSummaryV2(ValidatedFunction):
         self._last_prompt_token_estimate = 0
         try:
             if self.engine is not None:
-                with DynamicEngine(model=self.engine.model, api_key=self.engine.api_key):
+                with self._rewrapped_engine():
                     return self._forward_with_engine(**kwargs)
             return self._forward_with_engine(**kwargs)
         finally:
@@ -2417,7 +2431,7 @@ class HierarchicalSummaryV2(ValidatedFunction):
             if self.engine is not None:
                 def _invoke():
                     def _call():
-                        with DynamicEngine(model=self.engine.model, api_key=self.engine.api_key):
+                        with self._rewrapped_engine():
                             return fn(payload, **kwargs)
                     return self._invoke_tracked(_call)
             else:
