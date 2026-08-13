@@ -31,7 +31,6 @@ from pydantic import Field, create_model, field_validator
 from pydantic.fields import PydanticUndefined
 from symai import Symbol
 from symai.components import ChonkieChunker, DynamicEngine, FileReader, Function, MetadataTracker
-from symai.core_ext import bind
 from symai.functional import EngineRepository
 from symai.models import LLMDataModel
 from tenacity import (
@@ -906,40 +905,51 @@ class HierarchicalSummaryV2(ValidatedFunction):
         """
         )
 
-    @bind(engine="neurosymbolic", property="compute_required_tokens")(lambda: 0)
-    def _compute_required_tokens(self):
-        pass
+    def _active_engine_attr(self, name: str, default=None):
+        """Read an attribute off the ACTIVE neuro-symbolic engine, resolved per call.
+
+        Replaces the removed ``symai.core_ext.bind``. ``EngineRepository.get`` already
+        prefers the DynamicEngine established by the current processing context (via
+        ``CURRENT_ENGINE_VAR``, then a frame walk) and only falls back to the registered
+        default engine, so reading through it follows the model actually in use.
+
+        Resolving per call is the point. ``@bind(engine=..., property=...)(lambda: 0)``
+        invoked its decorator immediately, so the class attribute was the engine's
+        attribute captured once at class-definition time: it could not follow the
+        processing context, and — because it ran during import — it made a registered
+        neuro-symbolic engine a hard prerequisite for importing this module at all.
+        """
+        try:
+            return getattr(EngineRepository.get("neurosymbolic"), name, default)
+        except Exception:
+            return default
+
+    def _compute_required_tokens(self, *args, **kwargs):
+        """The active engine's token counter.
+
+        Deliberately does not swallow errors: callers rely on a raise here to fall back to
+        an engine-agnostic tokenizer count (an engine's counter assumes its own
+        prepared-message shape, so e.g. an OpenAI counter raises on a Gemini plain-string
+        prompt). A missing counter raises TypeError, exactly as the bound version did.
+        """
+        return self._active_engine_attr("compute_required_tokens")(*args, **kwargs)
 
     def _max_context_tokens(self) -> int:
         """Context window of the ACTIVE processing engine — the model set via the
-        DynamicEngine context in ``_forward_with_engine`` — so chunk sizing reflects
-        the real model in use rather than symai's global default engine (which may
-        report a different model's limits; ``@bind`` does not follow the context).
-        Falls back to the bound default engine when no processing engine is active or
-        the value is unavailable."""
-        try:
-            value = getattr(EngineRepository.get("neurosymbolic"), "max_context_tokens", None)
-            if isinstance(value, int) and value > 0:
-                return value
-        except Exception:
-            pass
-        try:
-            value = self._bound_max_context_tokens()
-            return value if isinstance(value, int) and value > 0 else 0
-        except Exception:
-            return 0
+        DynamicEngine context in ``_forward_with_engine`` — so chunk sizing reflects the
+        real model in use rather than symai's global default engine. Returns 0 when no
+        engine is resolvable or the value is unusable."""
+        value = self._active_engine_attr("max_context_tokens")
+        return value if isinstance(value, int) and value > 0 else 0
 
-    @bind(engine="neurosymbolic", property="max_context_tokens")
-    def _bound_max_context_tokens(_):
-        pass
+    def _max_response_tokens(self):
+        """Max response tokens of the ACTIVE processing engine."""
+        return self._active_engine_attr("max_response_tokens")
 
-    @bind(engine="neurosymbolic", property="max_response_tokens")
-    def _max_response_tokens(_):
-        pass
-
-    @bind(engine="neurosymbolic", property="compute_remaining_tokens")(lambda: 0)
-    def _compute_remaining_tokens(self):
-        pass
+    def _compute_remaining_tokens(self, *args, **kwargs):
+        """The active engine's remaining-token budget helper. Raises if unavailable, as
+        the bound version did."""
+        return self._active_engine_attr("compute_remaining_tokens")(*args, **kwargs)
 
     def _log_token_usage(self, tokens_added: int, operation: str = "processing") -> None:
         tokens_added = max(0, int(tokens_added))
@@ -1924,14 +1934,18 @@ class HierarchicalSummaryV2(ValidatedFunction):
         """Fresh DynamicEngine wrapping the caller-provided engine, for use as the active
         processing-engine context. A fresh instance (rather than reusing ``self.engine``)
         keeps per-worker context state isolated across parallel map stages. Forward the
-        engine attributes that carry caller intent beyond model + api_key — currently the
-        OpenAI Responses cache policy — so e.g. an explicit prompt-cache mode configured on
-        the passed engine is not silently dropped on the internal LLM calls.
+        engine attributes that carry caller intent beyond model + api_key — the OpenAI
+        Responses cache policy and the client-level HTTP settings — so e.g. an explicit
+        prompt-cache mode or a pinned retry budget configured on the passed engine is not
+        silently dropped on the internal LLM calls (retries live in symai's transport now,
+        so dropping ``client_max_retries`` would silently reinstate DEFAULT_RETRIES).
         """
         return DynamicEngine(
             model=self.engine.model,
             api_key=self.engine.api_key,
             prompt_cache_options=getattr(self.engine, "prompt_cache_options", None),
+            client_timeout=getattr(self.engine, "client_timeout", None),
+            client_max_retries=getattr(self.engine, "client_max_retries", None),
         )
 
     def forward(self, **kwargs) -> Summary:
