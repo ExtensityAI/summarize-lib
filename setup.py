@@ -17,7 +17,7 @@ setup(
     packages=["summarize_lib"],
     include_package_data=True,
     install_requires=[
-        "symbolicai>=1.10.0",
+        "symbolicai>=2,<3",
         "pydantic",
         "nest_asyncio",
         "tenacity",

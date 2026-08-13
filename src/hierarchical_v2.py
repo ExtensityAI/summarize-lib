@@ -1934,14 +1934,18 @@ class HierarchicalSummaryV2(ValidatedFunction):
         """Fresh DynamicEngine wrapping the caller-provided engine, for use as the active
         processing-engine context. A fresh instance (rather than reusing ``self.engine``)
         keeps per-worker context state isolated across parallel map stages. Forward the
-        engine attributes that carry caller intent beyond model + api_key — currently the
-        OpenAI Responses cache policy — so e.g. an explicit prompt-cache mode configured on
-        the passed engine is not silently dropped on the internal LLM calls.
+        engine attributes that carry caller intent beyond model + api_key — the OpenAI
+        Responses cache policy and the client-level HTTP settings — so e.g. an explicit
+        prompt-cache mode or a pinned retry budget configured on the passed engine is not
+        silently dropped on the internal LLM calls (retries live in symai's transport now,
+        so dropping ``client_max_retries`` would silently reinstate DEFAULT_RETRIES).
         """
         return DynamicEngine(
             model=self.engine.model,
             api_key=self.engine.api_key,
             prompt_cache_options=getattr(self.engine, "prompt_cache_options", None),
+            client_timeout=getattr(self.engine, "client_timeout", None),
+            client_max_retries=getattr(self.engine, "client_max_retries", None),
         )
 
     def forward(self, **kwargs) -> Summary:
